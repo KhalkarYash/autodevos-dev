@@ -1,0 +1,13 @@
+{
+  "name": "autodevos",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k \"npm --prefix output/backend/app run dev\" \"npm --prefix output/frontend/app run dev\"",
+    "test:backend": "npm --prefix output/backend/app test",
+    "test:frontend": "npm --prefix output/frontend/app test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}
