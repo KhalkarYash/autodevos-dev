@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Set, Awaitable, Any
+from typing import Callable, Dict, List, Set, Awaitable, Any, Optional
 from enum import Enum
 
 from .utils import log
@@ -28,9 +29,14 @@ class DAGTask:
     depends_on: List[str] = field(default_factory=list)
     retry_count: int = 0
     max_retries: int = 3
+    timeout: Optional[float] = 300.0  # Default 5 minute timeout per task
+    base_backoff: float = 2.0  # Base backoff in seconds
+    max_backoff: float = 60.0  # Max backoff in seconds
     status: TaskStatus = TaskStatus.PENDING
     error: Exception | None = None
     result: Any = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
 
 
 class DAGScheduler:
@@ -124,28 +130,71 @@ class DAGScheduler:
         return levels
     
     async def _execute_task(self, task: DAGTask) -> bool:
-        """Execute a single task with retry logic. Returns True if successful."""
+        """Execute a single task with retry logic, exponential backoff, and timeout. Returns True if successful."""
         task.status = TaskStatus.RUNNING
+        task.start_time = time.time()
+        
         log.info(f"Executing task: {task.name} (attempt {task.retry_count + 1}/{task.max_retries + 1})")
         
         try:
-            task.result = await task.fn(*task.args, **task.kwargs)
+            # Execute with timeout if specified
+            if task.timeout and task.timeout > 0:
+                task.result = await asyncio.wait_for(
+                    task.fn(*task.args, **task.kwargs),
+                    timeout=task.timeout
+                )
+            else:
+                task.result = await task.fn(*task.args, **task.kwargs)
+            
             task.status = TaskStatus.COMPLETED
-            log.info(f"✓ Task completed: {task.name}")
+            task.end_time = time.time()
+            elapsed = task.end_time - task.start_time
+            log.info(f"✓ Task completed: {task.name} (took {elapsed:.2f}s)")
             return True
             
-        except Exception as e:
+        except asyncio.TimeoutError as e:
             task.error = e
             task.retry_count += 1
+            elapsed = time.time() - task.start_time
             
             if task.retry_count <= task.max_retries:
-                log.warning(f"Task {task.name} failed (attempt {task.retry_count}/{task.max_retries + 1}): {e}")
+                backoff = self._calculate_backoff(task, task.retry_count - 1)
+                log.warning(f"Task {task.name} timed out after {elapsed:.2f}s "
+                           f"(attempt {task.retry_count}/{task.max_retries + 1}). "
+                           f"Retrying in {backoff:.2f}s...")
+                await asyncio.sleep(backoff)
                 task.status = TaskStatus.PENDING
                 return False
             else:
                 task.status = TaskStatus.FAILED
+                task.end_time = time.time()
+                log.error(f"✗ Task failed after {task.retry_count} timeout attempts: {task.name}")
+                return False
+                
+        except Exception as e:
+            task.error = e
+            task.retry_count += 1
+            elapsed = time.time() - task.start_time if task.start_time else 0
+            
+            if task.retry_count <= task.max_retries:
+                backoff = self._calculate_backoff(task, task.retry_count - 1)
+                log.warning(f"Task {task.name} failed after {elapsed:.2f}s "
+                           f"(attempt {task.retry_count}/{task.max_retries + 1}): {e}. "
+                           f"Retrying in {backoff:.2f}s...")
+                await asyncio.sleep(backoff)
+                task.status = TaskStatus.PENDING
+                return False
+            else:
+                task.status = TaskStatus.FAILED
+                task.end_time = time.time()
                 log.error(f"✗ Task failed after {task.retry_count} attempts: {task.name} - {e}")
                 return False
+    
+    def _calculate_backoff(self, task: DAGTask, attempt: int) -> float:
+        """Calculate exponential backoff with jitter for retry delays."""
+        backoff = min(task.base_backoff * (2 ** attempt), task.max_backoff)
+        jitter = (time.time() % 1) * 0.1 * backoff  # Add 0-10% jitter
+        return backoff + jitter
     
     async def run(self, fail_fast: bool = False) -> Dict[str, Any]:
         """

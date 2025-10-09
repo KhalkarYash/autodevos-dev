@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Any
+from typing import Awaitable, Callable, Dict, List, Any, Optional
 
 from .context_manager import MCPContext
 from .llm_interface import BaseLLM, make_llm
@@ -17,6 +17,11 @@ from agents.frontend_agent.generate_ui import generate_ui
 from agents.backend_agent.generate_api import generate_api
 from agents.testing_agent.generate_tests import generate_tests
 from agents.documentation_agent.generate_docs import generate_docs
+
+
+class PlanValidationError(Exception):
+    """Raised when plan validation fails."""
+    pass
 
 
 class Orchestrator:
@@ -38,10 +43,70 @@ class Orchestrator:
             "documentation": generate_docs,
         }
 
+    def _validate_task_spec(self, task_spec: Dict[str, Any]) -> bool:
+        """Validate a single task specification against required schema."""
+        required_fields = ["id", "name"]
+        
+        # Check required fields
+        for field in required_fields:
+            if field not in task_spec:
+                log.warning(f"Task spec missing required field '{field}': {task_spec}")
+                return False
+        
+        # Validate ID is a known agent
+        if task_spec["id"] not in self.agent_registry:
+            log.warning(f"Unknown agent ID '{task_spec['id']}' in task spec")
+            return False
+        
+        # Validate depends_on is a list
+        if "depends_on" in task_spec and not isinstance(task_spec["depends_on"], list):
+            log.warning(f"Task depends_on must be a list: {task_spec}")
+            return False
+        
+        return True
+    
+    def _validate_plan(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Validate and sanitize task plan.
+        Returns validated task list or raises PlanValidationError.
+        """
+        if not tasks:
+            raise PlanValidationError("Empty task plan")
+        
+        validated_tasks = []
+        task_ids = set()
+        
+        for task_spec in tasks:
+            if not self._validate_task_spec(task_spec):
+                log.warning(f"Skipping invalid task spec: {task_spec}")
+                continue
+            
+            # Check for duplicate IDs
+            if task_spec["id"] in task_ids:
+                log.warning(f"Duplicate task ID '{task_spec['id']}', skipping")
+                continue
+            
+            task_ids.add(task_spec["id"])
+            validated_tasks.append(task_spec)
+        
+        # Validate dependencies exist
+        for task_spec in validated_tasks:
+            for dep_id in task_spec.get("depends_on", []):
+                if dep_id not in task_ids:
+                    log.warning(f"Task '{task_spec['id']}' depends on unknown task '{dep_id}'")
+                    # Remove invalid dependency
+                    task_spec["depends_on"] = [d for d in task_spec["depends_on"] if d in task_ids]
+        
+        if not validated_tasks:
+            raise PlanValidationError("No valid tasks after validation")
+        
+        log.info(f"Plan validated: {len(validated_tasks)} valid tasks")
+        return validated_tasks
+
     def _parse_prompt_to_plan(self, prompt: str) -> List[Dict[str, Any]]:
         """
-        Use LLM to dynamically parse user prompt into a task plan.
-        Returns a list of task specifications.
+        Use LLM to dynamically parse user prompt into a task plan with robust error handling.
+        Returns a list of validated task specifications.
         """
         planning_prompt = f"""
 You are a software architecture planner. Given a user request, identify what components need to be built.
@@ -54,7 +119,7 @@ Available agents:
 
 User Request: {prompt}
 
-Return a JSON array of tasks with this structure:
+Return a JSON array of tasks with this EXACT structure:
 {{
   "tasks": [
     {{"id": "frontend", "name": "Generate React Frontend", "depends_on": []}},
@@ -67,23 +132,53 @@ Return a JSON array of tasks with this structure:
 Important:
 - Only include relevant components (e.g., skip frontend for CLI tools)
 - Set dependencies correctly (testing comes after code generation, docs come last)
-- Use only available agent IDs
+- Use only available agent IDs: frontend, backend, testing, documentation
+- Each task MUST have "id" and "name" fields
+- "depends_on" must be an array of task IDs
 
-Return ONLY the JSON, no other text.
+Return ONLY valid JSON, no other text.
 """
         
         try:
             response = self.llm.generate_code(planning_prompt, temperature=0.3, max_tokens=1024)
             
-            # Extract JSON from response
-            json_match = re.search(r'\{[\s\S]*"tasks"[\s\S]*\}', response)
-            if json_match:
-                plan_data = json.loads(json_match.group())
-                tasks = plan_data.get("tasks", [])
-                log.info(f"LLM planned {len(tasks)} tasks")
-                return tasks
+            # Extract JSON from response - try multiple patterns
+            json_patterns = [
+                r'\{[\s\S]*"tasks"[\s\S]*\}',  # Full object with tasks
+                r'\[[\s\S]*\]',  # Just array
+            ]
+            
+            plan_data = None
+            for pattern in json_patterns:
+                json_match = re.search(pattern, response)
+                if json_match:
+                    try:
+                        extracted = json_match.group()
+                        parsed = json.loads(extracted)
+                        
+                        # Handle both {"tasks": [...]} and [...] formats
+                        if isinstance(parsed, dict) and "tasks" in parsed:
+                            plan_data = parsed
+                            break
+                        elif isinstance(parsed, list):
+                            plan_data = {"tasks": parsed}
+                            break
+                    except json.JSONDecodeError:
+                        continue
+            
+            if plan_data and "tasks" in plan_data:
+                tasks = plan_data["tasks"]
+                log.info(f"LLM planned {len(tasks)} tasks (pre-validation)")
+                
+                # Validate and sanitize
+                try:
+                    validated = self._validate_plan(tasks)
+                    return validated
+                except PlanValidationError as e:
+                    log.error(f"Plan validation failed: {e}, using default plan")
+                    return self._default_plan()
             else:
-                log.warning("Failed to parse LLM plan, using default")
+                log.warning("Failed to parse valid JSON from LLM plan, using default")
                 return self._default_plan()
                 
         except Exception as e:

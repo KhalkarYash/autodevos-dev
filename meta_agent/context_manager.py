@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import fcntl
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,7 +62,7 @@ class MCPContext:
             self.append_event("artifact", artifact_info)
 
     def save(self) -> None:
-        """Thread-safe context persistence with atomic write."""
+        """Thread-safe context persistence with atomic write and file locking."""
         with self._lock:
             ensure_dir(self.storage_dir)
             
@@ -74,29 +75,70 @@ class MCPContext:
             }
             
             # Atomic write: write to temp file then rename
-            temp_path = self.storage_dir / f"context.tmp.{int(time.time() * 1000)}"
+            temp_path = self.storage_dir / f"context.tmp.{int(time.time() * 1000)}.{threading.get_ident()}"
             final_path = self.storage_dir / "context.json"
+            lock_path = self.storage_dir / "context.lock"
             
+            lock_fd = None
             try:
+                # Acquire file lock for cross-process safety
+                ensure_dir(lock_path.parent)
+                lock_fd = open(lock_path, 'w')
+                
+                try:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except IOError:
+                    # Lock held by another process, wait briefly
+                    log.debug("Waiting for context file lock...")
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+                
+                # Write to temp file
                 write_text(temp_path, json.dumps(context_data, indent=2))
+                
+                # Atomic rename
                 temp_path.rename(final_path)
+                
                 log.debug(f"Context saved to {final_path} (v{self.version})")
+                
             except Exception as e:
                 log.error(f"Failed to save context: {e}")
                 if temp_path.exists():
                     temp_path.unlink()
                 raise
+            finally:
+                # Release lock
+                if lock_fd:
+                    try:
+                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                        lock_fd.close()
+                    except:
+                        pass
     
     @classmethod
     def load(cls, project_name: str, storage_dir: Path) -> "MCPContext":
-        """Load context from disk with version recovery."""
+        """Load context from disk with version recovery and file locking."""
         context_file = storage_dir / "context.json"
+        lock_path = storage_dir / "context.lock"
         
         if not context_file.exists():
             log.info(f"No existing context found, creating new one")
             return cls(project_name=project_name, storage_dir=storage_dir)
         
+        lock_fd = None
         try:
+            # Acquire read lock
+            ensure_dir(lock_path.parent)
+            lock_fd = open(lock_path, 'w')
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+            
+            # Check for partial temp files and clean up
+            for temp_file in storage_dir.glob("context.tmp.*"):
+                temp_age = time.time() - temp_file.stat().st_mtime
+                if temp_age > 60:  # Older than 1 minute
+                    log.warning(f"Cleaning up stale temp file: {temp_file}")
+                    temp_file.unlink()
+            
+            # Load context
             with open(context_file, 'r') as f:
                 data = json.load(f)
             
@@ -107,11 +149,28 @@ class MCPContext:
                 events=data.get("events", []),
                 version=data.get("version", 1)
             )
-            log.info(f"Context loaded from {context_file} (v{ctx.version})")
+            log.info(f"Context loaded from {context_file} (v{ctx.version}, {len(ctx.events)} events)")
             return ctx
+            
+        except json.JSONDecodeError as e:
+            log.error(f"Corrupted context file: {e}, creating new context")
+            # Backup corrupted file
+            backup_path = context_file.with_suffix(f".json.corrupted.{int(time.time())}")
+            context_file.rename(backup_path)
+            log.info(f"Backed up corrupted context to {backup_path}")
+            return cls(project_name=project_name, storage_dir=storage_dir)
+            
         except Exception as e:
             log.error(f"Failed to load context: {e}, creating new one")
             return cls(project_name=project_name, storage_dir=storage_dir)
+        
+        finally:
+            if lock_fd:
+                try:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    lock_fd.close()
+                except:
+                    pass
     
     def atomic_update(self, updater_fn) -> Any:
         """Execute a function atomically within a lock and auto-save."""
