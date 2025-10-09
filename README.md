@@ -40,12 +40,39 @@ docker run -e DEMO_PROMPT="Build a Todo app" -p 3000:3000 -p 5173:5173 autodevos
 
 ## Architecture
 
-- `meta_agent/` – Orchestration, context manager, and LLM interface
-- `agents/` – Specialized agents (frontend, backend, testing, documentation)
-- `output/` – Generated artifacts
-- `docker/` – Dockerfile for local deployment
+- `meta_agent/` – Orchestration with DAG scheduler, thread-safe context, robust LLM interface
+- `agents/` – Specialized agents (React+TS frontend, Express+Prisma+JWT backend, PyTest testing, documentation)
+- `tests/` – Comprehensive unit and integration tests
+- `docker/` – Multi-stage Dockerfile with non-root user
+- `.github/workflows/` – Full CI/CD pipeline with security scanning
+- `scripts/` – End-to-end demo and utility scripts
 
-Agents collaborate through an MCP-like shared context and run in parallel where possible.
+Agents collaborate through a thread-safe MCP-based context with version tracking and atomic persistence.
+
+## Key Features
+
+### Core Platform
+- ✅ **Dynamic DAG Orchestration** - LLM-based task planning with dependency resolution
+- ✅ **Parallel Execution** - Independent tasks run concurrently with configurable limits
+- ✅ **Robust Error Handling** - Retry policies, exponential backoff, graceful degradation
+- ✅ **Thread-Safe Context** - MCP protocol with atomic updates and versioning
+- ✅ **Production Logging** - Rich console output with structured event tracking
+
+### Generated Applications
+- ✅ **React + TypeScript Frontend** - Vite, Tailwind CSS, Jest testing
+- ✅ **Express + TypeScript Backend** - Prisma ORM, SQLite/PostgreSQL, JWT auth
+- ✅ **User Authentication** - Registration, login, password hashing (bcrypt)
+- ✅ **Database Integration** - Prisma schema, migrations, type-safe queries
+- ✅ **API Security** - JWT middleware, protected routes, CORS enabled
+- ✅ **Comprehensive Tests** - Jest for frontend/backend, PyTest for integration
+- ✅ **Auto-Generated Docs** - README, API documentation, setup instructions
+
+### DevOps & Quality
+- ✅ **Multi-Stage Docker** - Optimized builds, non-root user, healthchecks
+- ✅ **GitHub Actions CI/CD** - Testing, linting, security scanning, deployment
+- ✅ **Security Scanning** - Trivy, Safety, SARIF output to GitHub Security
+- ✅ **Code Quality Tools** - Black, Flake8, MyPy, pytest with coverage
+- ✅ **End-to-End Demo** - Complete workflow from prompt to running app
 
 ## LLM Integration
 

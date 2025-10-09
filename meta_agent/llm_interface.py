@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+import time
+from typing import Optional, Iterator
+from functools import wraps
 
 from .utils import log
 
 
 class BaseLLM:
+    """Base class for LLM providers with retry and error handling support."""
+    
     def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 4096) -> str:
+        """Generate code from a prompt with optional system message."""
         raise NotImplementedError
+    
+    def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 4096) -> Iterator[str]:
+        """Generate code with streaming response (optional for providers that support it)."""
+        # Default implementation: return full response at once
+        yield self.generate_code(prompt, system, temperature, max_tokens)
 
 
 class MockLLM(BaseLLM):
@@ -27,34 +37,109 @@ class MockLLM(BaseLLM):
 
 
 class GeminiLLM(BaseLLM):
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash") -> None:
+    """Gemini LLM with retry logic, timeout handling, and streaming support."""
+    
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash", 
+                 max_retries: int = 3, timeout: float = 60.0) -> None:
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         self.model = model
+        self.max_retries = max_retries
+        self.timeout = timeout
         self._client = None
+        self._genai = None
+        
         if self.api_key:
             try:
                 import google.generativeai as genai  # type: ignore
+                self._genai = genai
                 genai.configure(api_key=self.api_key)
                 self._client = genai.GenerativeModel(self.model)
-                log.info("Gemini LLM initialized.")
+                log.info(f"Gemini LLM initialized: model={self.model}, max_retries={self.max_retries}")
             except Exception as e:
-                log.warning(f"Failed to initialize Gemini LLM, falling back to MockLLM: {e}")
+                log.warning(f"Failed to initialize Gemini LLM: {e}")
                 self._client = None
         else:
-            log.warning("GEMINI_API_KEY not set. Falling back to MockLLM.")
+            log.warning("GEMINI_API_KEY not set. Using MockLLM fallback.")
 
+    def _retry_with_backoff(self, func, *args, **kwargs):
+        """Execute function with exponential backoff retry logic."""
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if attempt < self.max_retries - 1:
+                    wait_time = (2 ** attempt) + (time.time() % 1)  # Exponential backoff with jitter
+                    log.warning(f"Gemini API error (attempt {attempt + 1}/{self.max_retries}): {e}. Retrying in {wait_time:.2f}s...")
+                    time.sleep(wait_time)
+                else:
+                    log.error(f"Gemini API failed after {self.max_retries} attempts: {e}")
+        raise last_error
+    
     def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 8192) -> str:
         if self._client is None:
+            log.debug("Gemini client not initialized, using MockLLM")
             return MockLLM().generate_code(prompt, system, temperature, max_tokens)
+        
         try:
-            # Some SDKs accept a list of parts; keep it simple for now
-            content = prompt if system is None else f"System: {system}\nUser: {prompt}"
-            resp = self._client.generate_content(content, generation_config={"temperature": temperature, "max_output_tokens": max_tokens})
-            text = resp.text or ""
-            return text
+            def _generate():
+                content = prompt if system is None else f"System: {system}\n\nUser: {prompt}"
+                generation_config = {
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                }
+                
+                # Add timeout handling
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"Gemini API call exceeded {self.timeout}s timeout")
+                
+                # Set timeout (Unix-like systems only)
+                try:
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(int(self.timeout))
+                except (ValueError, AttributeError):
+                    # Windows or signal not available
+                    pass
+                
+                try:
+                    resp = self._client.generate_content(content, generation_config=generation_config)
+                    text = resp.text if hasattr(resp, 'text') else str(resp)
+                    return text or ""
+                finally:
+                    try:
+                        signal.alarm(0)  # Cancel alarm
+                    except (ValueError, AttributeError):
+                        pass
+            
+            return self._retry_with_backoff(_generate)
+            
         except Exception as e:
-            log.error(f"Gemini error, using MockLLM fallback: {e}")
+            log.error(f"Gemini generation failed, using MockLLM fallback: {e}")
             return MockLLM().generate_code(prompt, system, temperature, max_tokens)
+    
+    def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 8192) -> Iterator[str]:
+        """Generate code with streaming response."""
+        if self._client is None:
+            yield MockLLM().generate_code(prompt, system, temperature, max_tokens)
+            return
+        
+        try:
+            content = prompt if system is None else f"System: {system}\n\nUser: {prompt}"
+            generation_config = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+            }
+            
+            resp = self._client.generate_content(content, generation_config=generation_config, stream=True)
+            for chunk in resp:
+                if hasattr(chunk, 'text'):
+                    yield chunk.text
+        except Exception as e:
+            log.error(f"Gemini streaming failed: {e}")
+            yield MockLLM().generate_code(prompt, system, temperature, max_tokens)
 
 
 def make_llm(prefer_gemini: bool = True) -> BaseLLM:

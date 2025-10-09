@@ -1,0 +1,153 @@
+{
+  "project_name": "AutoDevOS",
+  "version": 5,
+  "data": {
+    "artifacts": [
+      {
+        "agent": "frontend",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/frontend/app",
+        "timestamp": "2025-10-09T19:19:16.667927"
+      },
+      {
+        "agent": "backend",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/backend/app",
+        "timestamp": "2025-10-09T19:19:16.674718"
+      },
+      {
+        "agent": "testing",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/testing/python",
+        "timestamp": "2025-10-09T19:19:16.692555"
+      },
+      {
+        "agent": "documentation",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/documentation/docs",
+        "timestamp": "2025-10-09T19:19:16.704130"
+      }
+    ]
+  },
+  "events": [
+    {
+      "kind": "orchestration_start",
+      "payload": {
+        "prompt": "Build a task tracker with create and list tasks"
+      },
+      "timestamp": "2025-10-09T19:19:16.635686",
+      "version": 1
+    },
+    {
+      "kind": "execution_start",
+      "payload": {
+        "task_count": 4
+      },
+      "timestamp": "2025-10-09T19:19:16.641946",
+      "version": 1
+    },
+    {
+      "kind": "artifact",
+      "payload": {
+        "agent": "frontend",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/frontend/app",
+        "timestamp": "2025-10-09T19:19:16.667927"
+      },
+      "timestamp": "2025-10-09T19:19:16.667941",
+      "version": 2
+    },
+    {
+      "kind": "artifact",
+      "payload": {
+        "agent": "backend",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/backend/app",
+        "timestamp": "2025-10-09T19:19:16.674718"
+      },
+      "timestamp": "2025-10-09T19:19:16.674736",
+      "version": 3
+    },
+    {
+      "kind": "task_complete",
+      "payload": {
+        "task": "frontend"
+      },
+      "timestamp": "2025-10-09T19:19:16.678430",
+      "version": 3
+    },
+    {
+      "kind": "task_complete",
+      "payload": {
+        "task": "backend"
+      },
+      "timestamp": "2025-10-09T19:19:16.681874",
+      "version": 3
+    },
+    {
+      "kind": "artifact",
+      "payload": {
+        "agent": "testing",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/testing/python",
+        "timestamp": "2025-10-09T19:19:16.692555"
+      },
+      "timestamp": "2025-10-09T19:19:16.692574",
+      "version": 4
+    },
+    {
+      "kind": "task_complete",
+      "payload": {
+        "task": "testing"
+      },
+      "timestamp": "2025-10-09T19:19:16.696186",
+      "version": 4
+    },
+    {
+      "kind": "artifact",
+      "payload": {
+        "agent": "documentation",
+        "path": "/mnt/D/Projects/autodevos-warp/output_test/documentation/docs",
+        "timestamp": "2025-10-09T19:19:16.704130"
+      },
+      "timestamp": "2025-10-09T19:19:16.704367",
+      "version": 5
+    },
+    {
+      "kind": "task_complete",
+      "payload": {
+        "task": "documentation"
+      },
+      "timestamp": "2025-10-09T19:19:16.710034",
+      "version": 5
+    },
+    {
+      "kind": "execution_complete",
+      "payload": {
+        "total": 4,
+        "completed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "success_rate": 1.0,
+        "tasks": {
+          "completed": [
+            {
+              "id": "frontend",
+              "name": "Generate Frontend"
+            },
+            {
+              "id": "backend",
+              "name": "Generate Backend"
+            },
+            {
+              "id": "testing",
+              "name": "Generate Tests"
+            },
+            {
+              "id": "documentation",
+              "name": "Generate Documentation"
+            }
+          ],
+          "failed": [],
+          "skipped": []
+        }
+      },
+      "timestamp": "2025-10-09T19:19:16.714469",
+      "version": 5
+    }
+  ],
+  "saved_at": "2025-10-09T19:19:16.719658"
+}

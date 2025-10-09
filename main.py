@@ -24,11 +24,17 @@ async def amain() -> None:
 
     ctx = MCPContext(project_name="AutoDevOS", storage_dir=output_dir / ".ctx")
 
-    orch = Orchestrator(project_root=project_root, output_dir=output_dir)
-    await orch.run(prompt, ctx)
+    orch = Orchestrator(project_root=project_root, output_dir=output_dir, max_parallel=4, use_dynamic_planning=False)
+    summary = await orch.run(prompt, ctx, fail_fast=False)
 
     ctx.save()
-    log.info("Generation complete. See the output/ directory.")
+    
+    if summary['failed'] > 0:
+        log.error(f"Generation completed with errors: {summary['failed']} tasks failed")
+    else:
+        log.info(f"✓ Generation complete! {summary['completed']}/{summary['total']} tasks succeeded")
+    
+    log.info("See the output/ directory for generated artifacts.")
 
 
 if __name__ == "__main__":
