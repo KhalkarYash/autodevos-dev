@@ -5,9 +5,11 @@ import time
 from typing import Optional, Iterator
 from functools import wraps
 from pathlib import Path
+from dotenv import load_dotenv
 
 from .utils import log
 
+load_dotenv()
 
 class LLMConfigError(Exception):
     """Raised when LLM configuration is invalid."""
@@ -73,7 +75,7 @@ class GeminiLLM(BaseLLM):
         self._genai = None
         
         # Secure key loading with validation
-        self.api_key = self._load_api_key(api_key)
+        self.api_key = self._load_api_key(api_key = os.getenv("GEMINI_API_KEY"))
         
         if self.api_key:
             self._initialize_client()
@@ -109,7 +111,7 @@ class GeminiLLM(BaseLLM):
                     "HARASSMENT": "BLOCK_NONE",
                     "HATE_SPEECH": "BLOCK_NONE", 
                     "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                    "DANGEROUS_CONTENT": "BLOCK_NONE"
+                    # "DANGEROUS_CONTENT": "BLOCK_NONE"
                 }
             )
             log.info(f"Gemini LLM initialized: model={self.model}, max_retries={self.max_retries}, timeout={self.timeout}s")
