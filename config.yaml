@@ -2,7 +2,7 @@ orchestrator:
   parallelism: 2
   llm:
     provider: gemini
-    model: gemini-1.5-flash
+    model: gemini-2.5-flash
 
 paths:
   output: output

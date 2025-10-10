@@ -52,7 +52,7 @@ class MockLLM(BaseLLM):
 class GeminiLLM(BaseLLM):
     """Gemini LLM with production-grade retry logic, timeout, streaming, and secure key handling."""
     
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash", 
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash", 
                  max_retries: int = 3, timeout: float = 120.0, 
                  base_backoff: float = 2.0, max_backoff: float = 60.0) -> None:
         """
