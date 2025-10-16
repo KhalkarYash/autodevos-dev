@@ -10,7 +10,7 @@ from meta_agent.context_manager import MCPContext
 
 def generate_ui(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> None:
     """Generate a React+TypeScript frontend using Vite and Tailwind CSS."""
-    project_dir = out_dir / "app"
+    project_dir = out_dir 
     ensure_dir(project_dir / "src")
 
     pkg = {

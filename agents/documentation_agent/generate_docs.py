@@ -20,8 +20,8 @@ This project was generated from the prompt:
 
 ## Structure
 
-- output/frontend/app: React + TypeScript app (Vite + Tailwind + Jest)
-- output/backend/app: Node.js + Express + TypeScript API (Jest)
+- output/frontend: React + TypeScript app (Vite + Tailwind + Jest)
+- output/backend: Node.js + Express + TypeScript API (Jest)
 - agents/testing_agent/python: PyTest integration tests
 
 ## Running locally

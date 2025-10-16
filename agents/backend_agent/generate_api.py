@@ -9,7 +9,7 @@ from meta_agent.context_manager import MCPContext
 
 def generate_api(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> None:
     """Generate a Node.js + Express + TypeScript backend with a simple items API."""
-    project_dir = out_dir / "app"
+    project_dir = out_dir
     ensure_dir(project_dir / "src")
     ensure_dir(project_dir / "tests")
 
