@@ -1,41 +1,82 @@
 from __future__ import annotations
 
-import argparse
-import asyncio
 from pathlib import Path
 
 from meta_agent.context_manager import MCPContext
 from meta_agent.orchestrator import Orchestrator
 from meta_agent.utils import log
 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import logging
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="AutoDevOS Orchestrator")
-    p.add_argument("--prompt", type=str, help="Natural language prompt to generate an application", required=False)
-    p.add_argument("--output", type=str, default="output", help="Output directory for generated artifacts")
-    return p.parse_args()
-
-
-async def amain() -> None:
-    args = parse_args()
-    prompt = args.prompt or input("Enter a prompt for AutoDevOS: ")
-    project_root = Path(__file__).resolve().parent
-    output_dir = project_root / args.output
-
-    ctx = MCPContext(project_name="AutoDevOS", storage_dir=output_dir / ".ctx")
-
-    orch = Orchestrator(project_root=project_root, output_dir=output_dir, max_parallel=4, use_dynamic_planning=False)
-    summary = await orch.run(prompt, ctx, fail_fast=False)
-
-    ctx.save()
-    
-    if summary['failed'] > 0:
-        log.error(f"Generation completed with errors: {summary['failed']} tasks failed")
-    else:
-        log.info(f"✓ Generation complete! {summary['completed']}/{summary['total']} tasks succeeded")
-    
-    log.info("See the output/ directory for generated artifacts.")
+app = FastAPI(
+    title="AutoDevOS API",
+    description="AI-powered application generation service",
+    version="1.0.0"
+)
 
 
-if __name__ == "__main__":
-    asyncio.run(amain())
+class GenerateRequest(BaseModel):
+    prompt: str
+    output_dir: str = "output"
+
+
+class GenerateResponse(BaseModel):
+    success: bool
+    message: str
+    summary: dict
+
+
+async def run_generation(prompt: str, output_dir: str = "output"):
+    """Run the AutoDevOS generation pipeline."""
+    try: 
+        project_root = Path(__file__).resolve().parent
+        output_path = project_root / output_dir
+
+        ctx = MCPContext(project_name="AutoDevOS", storage_dir=output_path / ".ctx")
+
+        orch = Orchestrator(
+            project_root=project_root, 
+            output_dir=output_path, 
+            max_parallel=4, 
+            use_dynamic_planning=False
+        )
+        summary = await orch.run(prompt, ctx, fail_fast=False)
+
+        ctx.save()
+        
+        if summary['failed'] > 0:
+            log.error("Generation completed with errors: %d tasks failed", summary['failed'])
+            return {
+                "success": False,
+                "message": f"Generation completed with errors: {summary['failed']} tasks failed",
+                "summary": summary
+            }
+        else:
+            log.info("✓ Generation complete! %d/%d tasks succeeded", summary['completed'], summary['total'])
+            return {
+                "success": True,
+                "message": f"Generation complete! {summary['completed']}/{summary['total']} tasks succeeded",
+                "summary": summary
+            }
+        
+    except Exception as e:
+        logging.error("Error during generation: %s", str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get('/health')
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok", "service": "AutoDevOS"}
+
+
+@app.post('/generate', response_model=GenerateResponse)
+async def generate(request: GenerateRequest):
+    """Generate application from natural language prompt."""
+    result = await run_generation(prompt=request.prompt, output_dir=request.output_dir)
+    return result
+
+# if __name__ == "__main__":
+#     asyncio.run(amain())

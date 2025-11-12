@@ -1,0 +1,106 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   🚀 AutoDevOS FastAPI Server - Quick Reference
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📍 START SERVER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+./start_server.sh                           # Recommended
+python server.py                             # Alternative
+uvicorn main:app --reload                    # Manual
+
+
+🌐 ENDPOINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+http://localhost:8000/health                 # Health check
+http://localhost:8000/docs                   # Swagger UI
+http://localhost:8000/redoc                  # ReDoc
+http://localhost:8000/generate               # POST - Generate app
+
+
+🧪 TEST COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Health check
+curl http://localhost:8000/health
+
+# Generate app
+curl -X POST http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Create a todo app"}'
+
+# Run test client
+python test_api.py
+
+
+🐳 DOCKER COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Build
+docker build -t autodevos-server -f docker/Dockerfile.server .
+
+# Run
+docker run -p 8000:8000 \
+  -e GEMINI_API_KEY=your_key \
+  autodevos-server
+
+# Docker Compose
+docker-compose -f docker/docker-compose.server.yml up -d
+
+
+📝 ENVIRONMENT SETUP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Create .env file
+cp .env.example .env
+
+# Edit and add your API key
+nano .env
+
+# Required variable:
+GEMINI_API_KEY=your_google_api_key_here
+
+
+🔧 TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Check if port is in use
+lsof -i :8000
+
+# Kill process on port
+kill -9 $(lsof -t -i:8000)
+
+# Check server logs
+tail -f app.log
+
+# Reinstall dependencies
+pip install -r requirements.txt --force-reinstall
+
+
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SERVER_SETUP.md      # Quick start guide
+DEPLOYMENT.md        # Production deployment
+SERVER_SUMMARY.md    # Complete changes summary
+This file            # Quick reference
+
+
+✨ PYTHON CLIENT EXAMPLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+import requests
+
+# Generate app
+response = requests.post(
+    "http://localhost:8000/generate",
+    json={"prompt": "Create a blog with posts and comments"}
+)
+print(response.json())
+
+
+🎯 PRODUCTION READY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Fixed argparse issues
+✅ Proper async endpoints
+✅ Error handling
+✅ Health checks
+✅ Docker support
+✅ API documentation
+✅ Response models
+✅ Logging configured
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
