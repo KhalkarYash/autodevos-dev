@@ -26,7 +26,8 @@ def generate_ui(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> No
         },
         "dependencies": {
             "react": "^18.3.1",
-            "react-dom": "^18.3.1"
+            "react-dom": "^18.3.1",
+            "react-icons": "^5.5.0"
         },
         "devDependencies": {
             "@types/react": "^18.3.5",

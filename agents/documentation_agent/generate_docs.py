@@ -8,7 +8,7 @@ from meta_agent.context_manager import MCPContext
 
 
 def generate_docs(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> None:
-    docs_dir = out_dir / "docs"
+    docs_dir = out_dir
     ensure_dir(docs_dir)
 
     summary = f"""

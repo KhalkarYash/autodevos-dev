@@ -9,7 +9,7 @@ from meta_agent.context_manager import MCPContext
 
 def generate_tests(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> None:
     """Generate cross-cutting tests (e.g., Python PyTest) and ensure frontend/backend tests exist."""
-    tests_dir = out_dir / "python"
+    tests_dir = out_dir
     ensure_dir(tests_dir)
 
     test_plan = (
