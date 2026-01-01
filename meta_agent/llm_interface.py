@@ -34,18 +34,18 @@ class LLMAPIError(Exception):
 class BaseLLM:
     """Base class for LLM providers with retry and error handling support."""
     
-    def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 4096) -> str:
+    def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 16384) -> str:
         """Generate code from a prompt with optional system message."""
         raise NotImplementedError
     
-    def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 4096) -> Iterator[str]:
+    def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 16384) -> Iterator[str]:
         """Generate code with streaming response (optional for providers that support it)."""
         # Default implementation: return full response at once
         yield self.generate_code(prompt, system, temperature, max_tokens)
 
 
 class MockLLM(BaseLLM):
-    def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.0, max_tokens: int = 4096) -> str:
+    def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.0, max_tokens: int = 16384) -> str:
         # Very simple template-based responses to keep the system functional offline.
         p = prompt.lower()
         if "frontend" in p:
@@ -240,7 +240,7 @@ class GeminiLLM(BaseLLM):
         raise LLMAPIError(f"Gemini API failed after {self.max_retries} retries") from last_error
     
     def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, 
-                      max_tokens: int = 8192, max_continuations: int = 5, tail_length: int = 400) -> str:
+                      max_tokens: int = 16384, max_continuations: int = 10, tail_length: int = 500) -> str:
         """
         Generate code with automatic continuation for long/truncated outputs.
         
@@ -248,9 +248,9 @@ class GeminiLLM(BaseLLM):
             prompt: The main prompt for generation
             system: Optional system message
             temperature: Generation temperature (0.0-1.0)
-            max_tokens: Maximum tokens per generation call
-            max_continuations: Maximum number of continuation requests (default: 5)
-            tail_length: Number of characters from end of response to include in continuation (default: 400)
+            max_tokens: Maximum tokens per generation call (default: 16384)
+            max_continuations: Maximum number of continuation requests (default: 10)
+            tail_length: Number of characters from end of response to include in continuation (default: 500)
         
         Returns:
             Complete generated text, potentially from multiple continuation calls
@@ -340,7 +340,7 @@ class GeminiLLM(BaseLLM):
             return MockLLM().generate_code(prompt, system, temperature, max_tokens)
     
     def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, 
-                           max_tokens: int = 8192, max_continuations: int = 5, tail_length: int = 400) -> Iterator[str]:
+                           max_tokens: int = 16384, max_continuations: int = 10, tail_length: int = 500) -> Iterator[str]:
         """
         Generate code with streaming response, automatic continuation, and error handling.
         
@@ -348,9 +348,9 @@ class GeminiLLM(BaseLLM):
             prompt: The main prompt for generation
             system: Optional system message
             temperature: Generation temperature (0.0-1.0)
-            max_tokens: Maximum tokens per generation call
-            max_continuations: Maximum number of continuation requests
-            tail_length: Number of characters from end to include in continuation prompt
+            max_tokens: Maximum tokens per generation call (default: 16384)
+            max_continuations: Maximum number of continuation requests (default: 10)
+            tail_length: Number of characters from end to include in continuation prompt (default: 500)
         
         Yields:
             Text chunks as they are generated

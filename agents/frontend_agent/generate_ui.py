@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from meta_agent.utils import ensure_dir, write_text, write_json, log
 from meta_agent.llm_interface import BaseLLM
@@ -18,200 +18,273 @@ Generate clean, production-ready code following these rules:
 - Follow React best practices (hooks, functional components)
 - Include proper error handling
 - Make components reusable and modular
-- Return ONLY code, no explanations or markdown code blocks"""
+- Return ONLY code, no explanations or markdown code blocks
+- Do NOT wrap code in markdown code fences"""
+
+# Higher token limits for larger generations
+DEFAULT_MAX_TOKENS = 16384
+COMPONENT_MAX_TOKENS = 8192
+ANALYSIS_MAX_TOKENS = 4096
 
 
 def generate_ui(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> None:
-    """Generate a modular React+TypeScript frontend using Vite and Tailwind CSS."""
+    """Generate a modular React+TypeScript frontend using Vite and Tailwind CSS.
+    
+    The structure is fully dynamic - only files needed for the application are created.
+    No hardcoded/compulsory files beyond the essential Vite config.
+    """
     project_dir = out_dir
     
-    # Create industry-standard folder structure
-    _create_folder_structure(project_dir)
-    
-    # 1. Analyze requirements and determine what to generate
+    # 1. Analyze requirements FIRST to determine what to generate
     log.info("Analyzing frontend requirements...")
     structure = _analyze_requirements(prompt, llm)
-    log.info(f"Detected components: {structure.get('components', [])}")
-    log.info(f"Detected pages: {structure.get('pages', [])}")
+    log.info(f"App: {structure.get('app_name')}")
+    log.info(f"Components to generate: {[c.get('name') for c in structure.get('components', [])]}")
+    log.info(f"Pages to generate: {[p.get('name') for p in structure.get('pages', [])]}")
+    log.info(f"Hooks to generate: {[h.get('name') for h in structure.get('hooks', [])]}")
     
-    # 2. Generate static config files
-    log.info("Generating configuration files...")
-    _generate_config_files(project_dir, structure)
+    # 2. Create ONLY the folders that will be used
+    _create_dynamic_folder_structure(project_dir, structure)
     
-    # 3. Generate types/interfaces
-    log.info("Generating TypeScript types...")
-    _generate_types(prompt, project_dir, llm, structure)
+    # 3. Generate essential Vite config files (these are always needed)
+    log.info("Generating Vite configuration...")
+    _generate_vite_config(project_dir, structure)
     
-    # 4. Generate utility functions and hooks
-    log.info("Generating hooks and utilities...")
-    _generate_hooks(prompt, project_dir, llm, structure)
-    _generate_utils(prompt, project_dir, llm, structure)
+    # 4. Generate types ONLY if there are types defined
+    if structure.get("types"):
+        log.info("Generating TypeScript types...")
+        _generate_types(prompt, project_dir, llm, structure)
     
-    # 5. Generate components
-    log.info("Generating components...")
-    _generate_components(prompt, project_dir, llm, structure)
+    # 5. Generate hooks ONLY if there are hooks defined
+    if structure.get("hooks"):
+        log.info("Generating custom hooks...")
+        _generate_hooks(prompt, project_dir, llm, structure)
     
-    # 6. Generate pages
-    log.info("Generating pages...")
-    _generate_pages(prompt, project_dir, llm, structure)
+    # 6. Generate services ONLY if API endpoints exist
+    if structure.get("api_endpoints"):
+        log.info("Generating API services...")
+        _generate_services(prompt, project_dir, llm, structure)
     
-    # 7. Generate main App with routing
-    log.info("Generating App and main entry...")
+    # 7. Generate components
+    if structure.get("components"):
+        log.info("Generating components...")
+        _generate_components(prompt, project_dir, llm, structure)
+    
+    # 8. Generate pages
+    if structure.get("pages"):
+        log.info("Generating pages...")
+        _generate_pages(prompt, project_dir, llm, structure)
+    
+    # 9. Generate App and main entry (always needed)
+    log.info("Generating App entry point...")
     _generate_app(prompt, project_dir, llm, structure)
-    _generate_main_entry(project_dir)
-    
-    # 8. Generate tests
-    log.info("Generating tests...")
-    _generate_tests(project_dir, llm, structure)
+    _generate_main_entry(project_dir, structure)
 
     ctx.add_artifact("frontend", project_dir)
     log.info(f"Frontend generated at: {project_dir}")
 
 
-def _create_folder_structure(project_dir: Path) -> None:
-    """Create industry-standard React project folder structure."""
-    folders = [
-        "src",
-        "src/components",
-        "src/components/common",
-        "src/components/layout",
-        "src/hooks",
-        "src/pages",
-        "src/types",
-        "src/utils",
-        "src/services",
-        "src/context",
-        "src/assets",
-        "public",
-    ]
-    for folder in folders:
-        ensure_dir(project_dir / folder)
+def _create_dynamic_folder_structure(project_dir: Path, structure: Dict[str, Any]) -> None:
+    """Create ONLY the folders that will actually contain files."""
+    # Always needed for Vite
+    ensure_dir(project_dir / "src")
+    ensure_dir(project_dir / "public")
+    
+    # Conditional folders based on what's being generated
+    if structure.get("components"):
+        ensure_dir(project_dir / "src/components")
+        
+        # Check if we need layout/ui subdirs
+        component_names = [c.get("name", "") for c in structure.get("components", [])]
+        layout_keywords = ["Header", "Footer", "Sidebar", "Layout", "Navbar", "Navigation"]
+        ui_keywords = ["Button", "Input", "Card", "Modal", "Loader", "Spinner"]
+        
+        if any(name in layout_keywords for name in component_names):
+            ensure_dir(project_dir / "src/components/layout")
+        if any(name in ui_keywords for name in component_names):
+            ensure_dir(project_dir / "src/components/ui")
+    
+    if structure.get("pages"):
+        ensure_dir(project_dir / "src/pages")
+    
+    if structure.get("hooks"):
+        ensure_dir(project_dir / "src/hooks")
+    
+    if structure.get("types"):
+        ensure_dir(project_dir / "src/types")
+    
+    if structure.get("api_endpoints"):
+        ensure_dir(project_dir / "src/services")
+    
+    if structure.get("has_auth"):
+        ensure_dir(project_dir / "src/context")
 
 
 def _analyze_requirements(prompt: str, llm: BaseLLM) -> Dict[str, Any]:
-    """Use LLM to analyze prompt and determine what components/pages are needed."""
-    analysis_prompt = f"""Analyze this application requirement and return a JSON structure.
+    """Use LLM to analyze prompt and determine exactly what files to generate."""
+    analysis_prompt = f"""Analyze this application requirement and return a JSON structure describing EXACTLY what needs to be built.
 
 Requirement: {prompt}
 
-Return a JSON object with this exact structure:
+Return a JSON object. Be SPECIFIC - only include what's actually needed for this app:
+
 {{
-  "app_name": "kebab-case-name",
-  "description": "Brief description",
+  "app_name": "kebab-case-name-based-on-app",
+  "description": "One line description",
   "components": [
-    {{"name": "ComponentName", "purpose": "What it does", "props": ["prop1", "prop2"]}}
+    {{"name": "ExactComponentName", "purpose": "What it does", "props": ["propName"], "category": "layout|ui|feature"}}
   ],
   "pages": [
-    {{"name": "PageName", "route": "/path", "purpose": "What it shows"}}
+    {{"name": "PageName", "route": "/exact-path", "purpose": "What this page shows"}}
   ],
   "hooks": [
-    {{"name": "useHookName", "purpose": "What it does"}}
+    {{"name": "useExactHookName", "purpose": "What state/logic it manages"}}
   ],
   "types": [
-    {{"name": "TypeName", "fields": {{"field1": "string", "field2": "number"}}}}
+    {{"name": "TypeName", "purpose": "What data it represents", "fields": {{"fieldName": "type"}}}}
   ],
-  "features": ["feature1", "feature2"],
-  "api_endpoints": ["/api/endpoint1"],
-  "has_auth": false,
-  "has_routing": true
+  "api_endpoints": ["/api/exact-endpoint"],
+  "has_auth": true/false,
+  "has_routing": true/false,
+  "state_management": "local|context|none"
 }}
 
-Be thorough - identify ALL components, pages, and hooks needed for this application.
-Return ONLY valid JSON, no explanations."""
+IMPORTANT:
+- Only include components/pages/hooks that are ACTUALLY needed
+- Use descriptive, specific names (not generic like "ItemList" unless it's really a list of items)
+- If the app is simple, keep the structure simple
+- Don't add unnecessary complexity
+
+Return ONLY valid JSON."""
 
     response = llm.generate_code(
         analysis_prompt, 
-        system=FRONTEND_SYSTEM_PROMPT,
-        temperature=0.3, 
-        max_tokens=2048
+        system="You are an expert software architect. Analyze requirements precisely.",
+        temperature=0.2, 
+        max_tokens=ANALYSIS_MAX_TOKENS
     )
     
     # Parse JSON from response
     try:
-        # Try to extract JSON from response
-        json_match = re.search(r'\{[\s\S]*\}', response)
+        # Extract JSON from response (handle markdown code blocks)
+        cleaned = re.sub(r'^```(?:json)?\s*\n?', '', response, flags=re.MULTILINE)
+        cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
+        
+        json_match = re.search(r'\{[\s\S]*\}', cleaned)
         if json_match:
             parsed = json.loads(json_match.group())
-            # Validate required fields
-            if "components" in parsed and "pages" in parsed:
+            # Validate we got something useful
+            if parsed.get("components") or parsed.get("pages"):
+                log.debug(f"Successfully parsed LLM analysis: {len(parsed.get('components', []))} components, {len(parsed.get('pages', []))} pages")
                 return parsed
     except json.JSONDecodeError as e:
         log.warning(f"Failed to parse LLM response as JSON: {e}")
     
-    # Fallback with sensible defaults based on prompt keywords
+    # Fallback: generate minimal structure based on keywords
+    log.info("Using fallback structure analysis")
     return _generate_fallback_structure(prompt)
 
 
 def _generate_fallback_structure(prompt: str) -> Dict[str, Any]:
-    """Generate fallback structure when LLM analysis fails."""
+    """Generate minimal structure when LLM analysis fails."""
     prompt_lower = prompt.lower()
+    words = prompt_lower.split()
     
-    components = [
-        {"name": "Header", "purpose": "Navigation header", "props": []},
-        {"name": "Footer", "purpose": "Page footer", "props": []},
-    ]
-    pages = [
-        {"name": "HomePage", "route": "/", "purpose": "Main landing page"},
-    ]
-    hooks = []
-    types = []
+    # Extract app name from prompt
+    app_name = "-".join(words[:3]) if len(words) >= 3 else "my-app"
+    app_name = re.sub(r'[^a-z0-9-]', '', app_name)
     
-    # Detect common patterns
-    if any(word in prompt_lower for word in ["list", "items", "products", "posts"]):
-        components.append({"name": "ItemList", "purpose": "Display list of items", "props": ["items"]})
-        components.append({"name": "ItemCard", "purpose": "Single item display", "props": ["item"]})
-        types.append({"name": "Item", "fields": {"id": "string", "title": "string", "description": "string"}})
-        hooks.append({"name": "useItems", "purpose": "Fetch and manage items"})
+    components: List[Dict[str, Any]] = []
+    pages: List[Dict[str, Any]] = [{"name": "HomePage", "route": "/", "purpose": "Main page", "category": "page"}]
+    hooks: List[Dict[str, Any]] = []
+    types: List[Dict[str, Any]] = []
+    api_endpoints: List[str] = []
     
-    if any(word in prompt_lower for word in ["form", "create", "add", "submit"]):
-        components.append({"name": "ItemForm", "purpose": "Form for creating/editing", "props": ["onSubmit", "initialData"]})
-        components.append({"name": "FormInput", "purpose": "Reusable input field", "props": ["label", "value", "onChange"]})
+    # Detect what's actually needed from keywords
+    if any(word in prompt_lower for word in ["todo", "task", "list"]):
+        components.extend([
+            {"name": "TodoList", "purpose": "Display todos", "props": ["todos", "onToggle", "onDelete"], "category": "feature"},
+            {"name": "TodoItem", "purpose": "Single todo", "props": ["todo", "onToggle", "onDelete"], "category": "feature"},
+            {"name": "AddTodoForm", "purpose": "Add new todo", "props": ["onAdd"], "category": "feature"},
+        ])
+        types.append({"name": "Todo", "purpose": "Todo item", "fields": {"id": "string", "text": "string", "completed": "boolean"}})
+        hooks.append({"name": "useTodos", "purpose": "Manage todo state"})
     
-    if any(word in prompt_lower for word in ["search", "filter"]):
-        components.append({"name": "SearchBar", "purpose": "Search input", "props": ["onSearch"]})
-        hooks.append({"name": "useSearch", "purpose": "Handle search logic"})
+    if any(word in prompt_lower for word in ["blog", "post", "article"]):
+        components.extend([
+            {"name": "PostList", "purpose": "List of posts", "props": ["posts"], "category": "feature"},
+            {"name": "PostCard", "purpose": "Post preview", "props": ["post"], "category": "feature"},
+        ])
+        pages.append({"name": "PostPage", "route": "/post/:id", "purpose": "Single post view"})
+        types.append({"name": "Post", "purpose": "Blog post", "fields": {"id": "string", "title": "string", "content": "string", "createdAt": "string"}})
+        api_endpoints.append("/api/posts")
     
-    if any(word in prompt_lower for word in ["detail", "view", "single"]):
-        pages.append({"name": "DetailPage", "route": "/detail/:id", "purpose": "Show item details"})
+    if any(word in prompt_lower for word in ["shop", "store", "product", "cart", "ecommerce"]):
+        components.extend([
+            {"name": "ProductGrid", "purpose": "Product listing", "props": ["products"], "category": "feature"},
+            {"name": "ProductCard", "purpose": "Product display", "props": ["product", "onAddToCart"], "category": "feature"},
+            {"name": "Cart", "purpose": "Shopping cart", "props": ["items", "onRemove"], "category": "feature"},
+        ])
+        pages.append({"name": "ProductPage", "route": "/product/:id", "purpose": "Product details"})
+        types.append({"name": "Product", "purpose": "Product item", "fields": {"id": "string", "name": "string", "price": "number", "image": "string"}})
+        hooks.append({"name": "useCart", "purpose": "Cart state management"})
+        api_endpoints.append("/api/products")
     
-    if any(word in prompt_lower for word in ["dashboard", "admin"]):
+    if any(word in prompt_lower for word in ["dashboard", "admin", "analytics"]):
+        components.extend([
+            {"name": "StatCard", "purpose": "Statistics display", "props": ["title", "value", "change"], "category": "feature"},
+            {"name": "Chart", "purpose": "Data visualization", "props": ["data", "type"], "category": "feature"},
+        ])
         pages.append({"name": "DashboardPage", "route": "/dashboard", "purpose": "Dashboard view"})
-        components.append({"name": "StatsCard", "purpose": "Display statistics", "props": ["title", "value"]})
     
-    if any(word in prompt_lower for word in ["auth", "login", "signup"]):
-        pages.append({"name": "LoginPage", "route": "/login", "purpose": "User login"})
-        components.append({"name": "LoginForm", "purpose": "Login form", "props": ["onLogin"]})
+    if any(word in prompt_lower for word in ["auth", "login", "signup", "register"]):
+        components.extend([
+            {"name": "LoginForm", "purpose": "User login", "props": ["onSubmit"], "category": "feature"},
+        ])
+        pages.append({"name": "LoginPage", "route": "/login", "purpose": "Login page"})
         hooks.append({"name": "useAuth", "purpose": "Authentication state"})
     
+    if any(word in prompt_lower for word in ["chat", "message", "conversation"]):
+        components.extend([
+            {"name": "MessageList", "purpose": "Chat messages", "props": ["messages"], "category": "feature"},
+            {"name": "MessageInput", "purpose": "Send message", "props": ["onSend"], "category": "feature"},
+        ])
+        types.append({"name": "Message", "purpose": "Chat message", "fields": {"id": "string", "text": "string", "sender": "string", "timestamp": "string"}})
+        hooks.append({"name": "useMessages", "purpose": "Message handling"})
+    
+    # Add header if app seems complex enough
+    if len(pages) > 1 or len(components) > 2:
+        components.insert(0, {"name": "Header", "purpose": "Navigation", "props": [], "category": "layout"})
+    
     return {
-        "app_name": "autodevos-app",
+        "app_name": app_name or "my-app",
         "description": prompt[:100],
         "components": components,
         "pages": pages,
         "hooks": hooks,
         "types": types,
-        "features": [],
-        "api_endpoints": ["/api/items"],
-        "has_auth": "auth" in prompt_lower or "login" in prompt_lower,
-        "has_routing": len(pages) > 1
+        "api_endpoints": api_endpoints,
+        "has_auth": any(word in prompt_lower for word in ["auth", "login"]),
+        "has_routing": len(pages) > 1,
+        "state_management": "context" if hooks else "local"
     }
 
 
-def _generate_config_files(project_dir: Path, structure: Dict[str, Any]) -> None:
-    """Generate static config files."""
-    app_name = structure.get("app_name", "autodevos-frontend")
-    has_routing = structure.get("has_routing", True)
+def _generate_vite_config(project_dir: Path, structure: Dict[str, Any]) -> None:
+    """Generate essential Vite/React config files."""
+    app_name = structure.get("app_name", "vite-react-app")
+    has_routing = structure.get("has_routing", False)
     
-    # package.json
-    dependencies = {
+    # Determine dependencies based on what's needed
+    dependencies: Dict[str, str] = {
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
-        "react-icons": "^5.5.0",
     }
     
     if has_routing:
         dependencies["react-router-dom"] = "^6.22.0"
     
+    # package.json
     pkg = {
         "name": app_name,
         "private": True,
@@ -220,9 +293,7 @@ def _generate_config_files(project_dir: Path, structure: Dict[str, Any]) -> None
         "scripts": {
             "dev": "vite",
             "build": "tsc -b && vite build",
-            "preview": "vite preview",
-            "lint": "eslint src --ext ts,tsx",
-            "test": "jest --passWithNoTests"
+            "preview": "vite preview"
         },
         "dependencies": dependencies,
         "devDependencies": {
@@ -233,13 +304,7 @@ def _generate_config_files(project_dir: Path, structure: Dict[str, Any]) -> None
             "postcss": "^8.4.47",
             "tailwindcss": "^3.4.14",
             "typescript": "^5.6.3",
-            "vite": "^5.4.8",
-            "jest": "^29.7.0",
-            "ts-jest": "^29.3.4",
-            "@types/jest": "^29.5.14",
-            "@testing-library/react": "^16.0.1",
-            "@testing-library/jest-dom": "^6.6.3",
-            "jest-environment-jsdom": "^29.7.0"
+            "vite": "^5.4.8"
         }
     }
     write_json(project_dir / "package.json", pkg)
@@ -258,26 +323,17 @@ def _generate_config_files(project_dir: Path, structure: Dict[str, Any]) -> None
             "isolatedModules": True,
             "noEmit": True,
             "esModuleInterop": True,
-            "allowJs": False,
             "strict": True,
-            "forceConsistentCasingInFileNames": True,
-            "types": ["jest", "@testing-library/jest-dom"],
             "baseUrl": ".",
             "paths": {
-                "@/*": ["src/*"],
-                "@components/*": ["src/components/*"],
-                "@pages/*": ["src/pages/*"],
-                "@hooks/*": ["src/hooks/*"],
-                "@types/*": ["src/types/*"],
-                "@utils/*": ["src/utils/*"],
-                "@services/*": ["src/services/*"]
+                "@/*": ["src/*"]
             }
         },
-        "include": ["src", "vite.config.ts", "jest.config.ts", "setupTests.ts"]
+        "include": ["src"]
     }
     write_json(project_dir / "tsconfig.json", tsconfig)
 
-    # vite.config.ts with path aliases
+    # vite.config.ts
     vite_cfg = '''import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
@@ -287,12 +343,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
-      '@components': path.resolve(__dirname, './src/components'),
-      '@pages': path.resolve(__dirname, './src/pages'),
-      '@hooks': path.resolve(__dirname, './src/hooks'),
-      '@types': path.resolve(__dirname, './src/types'),
-      '@utils': path.resolve(__dirname, './src/utils'),
-      '@services': path.resolve(__dirname, './src/services'),
     },
   },
 })
@@ -305,11 +355,9 @@ export default defineConfig({
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="{structure.get('description', 'AutoDevOS Frontend')}" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <title>{app_name.replace('-', ' ').title()}</title>
   </head>
-  <body class="min-h-screen bg-gray-50 text-slate-900 antialiased">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
@@ -318,543 +366,357 @@ export default defineConfig({
     write_text(project_dir / "index.html", index_html)
 
     # postcss.config.js
-    postcss = '''export default {
+    write_text(project_dir / "postcss.config.js", '''export default {
   plugins: {
     tailwindcss: {},
     autoprefixer: {},
   },
 }
-'''
-    write_text(project_dir / "postcss.config.js", postcss)
+''')
 
     # tailwind.config.js
-    tailwind = '''/** @type {import('tailwindcss').Config} */
+    write_text(project_dir / "tailwind.config.js", '''/** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
-  theme: {
-    extend: {
-      colors: {
-        primary: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-        },
-      },
-    },
-  },
+  theme: { extend: {} },
   plugins: [],
 }
-'''
-    write_text(project_dir / "tailwind.config.js", tailwind)
+''')
 
     # src/index.css
-    css = '''@tailwind base;
+    write_text(project_dir / "src/index.css", '''@tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@layer base {
-  html {
-    @apply scroll-smooth;
-  }
-  body {
-    @apply font-sans;
-  }
-}
-
-@layer components {
-  .btn {
-    @apply px-4 py-2 rounded-lg font-medium transition-colors duration-200;
-  }
-  .btn-primary {
-    @apply bg-primary-600 text-white hover:bg-primary-700;
-  }
-  .btn-secondary {
-    @apply bg-gray-200 text-gray-800 hover:bg-gray-300;
-  }
-  .input {
-    @apply w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent;
-  }
-  .card {
-    @apply bg-white rounded-xl shadow-md p-6;
-  }
-}
-'''
-    write_text(project_dir / "src/index.css", css)
-
-    # Jest config
-    jest_cfg = '''import type { Config } from 'jest'
-
-const config: Config = {
-  testEnvironment: 'jsdom',
-  transform: {
-    '^.+\\.(ts|tsx)$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
-  },
-  moduleFileExtensions: ['ts', 'tsx', 'js'],
-  setupFilesAfterEnv: ['<rootDir>/setupTests.ts'],
-  moduleNameMapper: {
-    '^@/(.*)$': '<rootDir>/src/$1',
-    '^@components/(.*)$': '<rootDir>/src/components/$1',
-    '^@pages/(.*)$': '<rootDir>/src/pages/$1',
-    '^@hooks/(.*)$': '<rootDir>/src/hooks/$1',
-    '^@types/(.*)$': '<rootDir>/src/types/$1',
-    '^@utils/(.*)$': '<rootDir>/src/utils/$1',
-  },
-}
-
-export default config
-'''
-    write_text(project_dir / "jest.config.ts", jest_cfg)
-
-    # Setup tests
-    setup_tests = "import '@testing-library/jest-dom'\n"
-    write_text(project_dir / "setupTests.ts", setup_tests)
-
-    # .gitignore
-    gitignore = '''# Dependencies
-node_modules
-.pnp
-.pnp.js
-
-# Build
-dist
-build
-
-# IDE
-.idea
-.vscode
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-npm-debug.log*
-
-# Testing
-coverage
-'''
-    write_text(project_dir / ".gitignore", gitignore)
+''')
 
 
 def _generate_types(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate TypeScript type definitions."""
+    """Generate TypeScript types - each type in its own file."""
     types_dir = project_dir / "src/types"
-    
-    # Generate index.ts that exports all types
     types_list = structure.get("types", [])
     
     if not types_list:
-        # Generate types based on prompt
-        types_prompt = f"""Generate TypeScript type definitions for this application:
+        return
+    
+    generated_types = []
+    
+    for type_def in types_list:
+        type_name = type_def.get("name", "Unknown")
+        type_purpose = type_def.get("purpose", "")
+        type_fields = type_def.get("fields", {})
+        
+        # Generate type using LLM for better quality
+        type_prompt = f"""Generate a TypeScript interface/type for: {type_name}
 
+Purpose: {type_purpose}
+Base fields: {type_fields}
 Application: {prompt}
-Features: {structure.get('features', [])}
-API endpoints: {structure.get('api_endpoints', [])}
 
-Create interfaces and types for:
-1. Data models (items, users, etc.)
-2. API response types
-3. Component prop types
-4. Form data types
+Requirements:
+- Export the interface
+- Add JSDoc comments
+- Include any related types (e.g., CreateDTO, UpdateDTO if relevant)
+- Use proper TypeScript conventions
 
-Use proper TypeScript conventions. Export all types.
-Return ONLY TypeScript code."""
+Return ONLY TypeScript code, no markdown."""
 
-        types_code = llm.generate_code(
-            types_prompt,
+        type_code = llm.generate_code(
+            type_prompt,
             system=FRONTEND_SYSTEM_PROMPT,
-            temperature=0.3,
-            max_tokens=2048
+            temperature=0.2,
+            max_tokens=1024
         )
         
-        # Clean up response
-        types_code = _clean_code_response(types_code, "typescript")
-        write_text(types_dir / "index.ts", types_code)
-    else:
-        # Generate from structure
-        type_definitions = []
-        for type_def in types_list:
-            name = type_def.get("name", "Unknown")
-            fields = type_def.get("fields", {})
-            
-            field_strs = [f"  {k}: {v};" for k, v in fields.items()]
-            type_definitions.append(f"export interface {name} {{\n" + "\n".join(field_strs) + "\n}")
-        
-        # Add common types
-        common_types = '''
-// Common utility types
-export type ID = string | number;
-
-export interface ApiResponse<T> {
-  data: T;
-  success: boolean;
-  message?: string;
-}
-
-export interface PaginatedResponse<T> {
-  data: T[];
-  total: number;
-  page: number;
-  pageSize: number;
-}
-
-export interface FormState {
-  isSubmitting: boolean;
-  errors: Record<string, string>;
-}
-'''
-        
-        full_types = "\n\n".join(type_definitions) + common_types
-        write_text(types_dir / "index.ts", full_types)
+        type_code = _clean_code_response(type_code)
+        write_text(types_dir / f"{type_name}.ts", type_code)
+        generated_types.append(type_name)
+    
+    # Generate index.ts that re-exports all types
+    if generated_types:
+        index_content = "\n".join([f"export * from './{t}';" for t in generated_types])
+        write_text(types_dir / "index.ts", index_content + "\n")
 
 
 def _generate_hooks(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate custom React hooks."""
+    """Generate custom hooks - each hook in its own file."""
     hooks_dir = project_dir / "src/hooks"
     hooks_list = structure.get("hooks", [])
     
+    if not hooks_list:
+        return
+    
     generated_hooks = []
+    type_names = [t.get("name") for t in structure.get("types", [])]
     
     for hook in hooks_list:
-        hook_name = hook.get("name", "useCustomHook")
-        hook_purpose = hook.get("purpose", "Custom hook")
+        hook_name = hook.get("name", "useCustom")
+        hook_purpose = hook.get("purpose", "")
         
-        hook_prompt = f"""Generate a React custom hook named {hook_name}.
+        hook_prompt = f"""Generate a React custom hook: {hook_name}
 
 Purpose: {hook_purpose}
-Application context: {prompt}
-Available types: {[t.get('name') for t in structure.get('types', [])]}
+Application: {prompt}
+Available types to import from '@/types': {type_names}
 API endpoints: {structure.get('api_endpoints', [])}
 
 Requirements:
-- Use TypeScript with proper types
-- Handle loading, error, and success states
-- Follow React hooks best practices
-- Include cleanup in useEffect if needed
-- Return an object with state and handlers
+- Use TypeScript
+- Handle loading, error states if doing async operations
+- Follow React hooks rules
+- Include proper cleanup
+- Export as default and named export
 
-Return ONLY the hook code with imports."""
+Return ONLY the code, no markdown."""
 
         hook_code = llm.generate_code(
             hook_prompt,
             system=FRONTEND_SYSTEM_PROMPT,
             temperature=0.3,
-            max_tokens=1500
+            max_tokens=2048
         )
         
-        hook_code = _clean_code_response(hook_code, "typescript")
+        hook_code = _clean_code_response(hook_code)
+        
+        # Ensure exports
+        if f"export default {hook_name}" not in hook_code and "export default" not in hook_code:
+            hook_code += f"\n\nexport default {hook_name};\n"
+        
         write_text(hooks_dir / f"{hook_name}.ts", hook_code)
         generated_hooks.append(hook_name)
     
-    # Generate index.ts for hooks
+    # Generate index
     if generated_hooks:
-        index_content = "\n".join([f"export {{ default as {h} }} from './{h}';" for h in generated_hooks])
-        # Also export with named exports
-        index_content += "\n\n// Alternative named exports\n"
-        index_content += "\n".join([f"export {{ {h} }} from './{h}';" for h in generated_hooks])
-        write_text(hooks_dir / "index.ts", index_content)
-    else:
-        # Create a placeholder
-        write_text(hooks_dir / "index.ts", "// Custom hooks will be exported here\nexport {}\n")
+        index_lines = [f"export {{ default as {h} }} from './{h}';" for h in generated_hooks]
+        write_text(hooks_dir / "index.ts", "\n".join(index_lines) + "\n")
 
 
-def _generate_utils(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate utility functions."""
-    utils_dir = project_dir / "src/utils"
+def _generate_services(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
+    """Generate API service layer."""
+    services_dir = project_dir / "src/services"
+    endpoints = structure.get("api_endpoints", [])
+    type_names = [t.get("name") for t in structure.get("types", [])]
     
-    utils_prompt = f"""Generate utility functions for this React application:
+    if not endpoints:
+        return
+    
+    service_prompt = f"""Generate an API service module for a React app.
 
+API Endpoints: {endpoints}
+Available types from '@/types': {type_names}
 Application: {prompt}
-Features: {structure.get('features', [])}
 
-Create utilities for:
-1. API helper functions (fetch wrapper)
-2. Form validation helpers
-3. Date/string formatting
-4. Local storage helpers
-5. Any app-specific helpers
+Requirements:
+- Create a typed API client
+- Use fetch or axios pattern
+- Handle errors properly
+- Export functions for each endpoint (get, create, update, delete as needed)
+- Use TypeScript
 
-Use TypeScript. Export all functions.
 Return ONLY the code."""
 
-    utils_code = llm.generate_code(
-        utils_prompt,
+    service_code = llm.generate_code(
+        service_prompt,
         system=FRONTEND_SYSTEM_PROMPT,
         temperature=0.3,
-        max_tokens=2048
+        max_tokens=3000
     )
     
-    utils_code = _clean_code_response(utils_code, "typescript")
-    write_text(utils_dir / "index.ts", utils_code)
-    
-    # Generate API service
-    api_service = '''import { ApiResponse } from '@/types';
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
-
-interface RequestOptions extends RequestInit {
-  params?: Record<string, string>;
-}
-
-class ApiService {
-  private baseUrl: string;
-
-  constructor(baseUrl: string = API_BASE_URL) {
-    this.baseUrl = baseUrl;
-  }
-
-  private async request<T>(
-    endpoint: string,
-    options: RequestOptions = {}
-  ): Promise<ApiResponse<T>> {
-    const { params, ...fetchOptions } = options;
-    
-    let url = `${this.baseUrl}${endpoint}`;
-    if (params) {
-      const searchParams = new URLSearchParams(params);
-      url += `?${searchParams.toString()}`;
-    }
-
-    try {
-      const response = await fetch(url, {
-        ...fetchOptions,
-        headers: {
-          'Content-Type': 'application/json',
-          ...fetchOptions.headers,
-        },
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Request failed');
-      }
-
-      return { data, success: true };
-    } catch (error) {
-      return {
-        data: null as T,
-        success: false,
-        message: error instanceof Error ? error.message : 'Unknown error',
-      };
-    }
-  }
-
-  async get<T>(endpoint: string, params?: Record<string, string>) {
-    return this.request<T>(endpoint, { method: 'GET', params });
-  }
-
-  async post<T>(endpoint: string, body: unknown) {
-    return this.request<T>(endpoint, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
-  }
-
-  async put<T>(endpoint: string, body: unknown) {
-    return this.request<T>(endpoint, {
-      method: 'PUT',
-      body: JSON.stringify(body),
-    });
-  }
-
-  async delete<T>(endpoint: string) {
-    return this.request<T>(endpoint, { method: 'DELETE' });
-  }
-}
-
-export const api = new ApiService();
-export default ApiService;
-'''
-    write_text(project_dir / "src/services/api.ts", api_service)
+    service_code = _clean_code_response(service_code)
+    write_text(services_dir / "api.ts", service_code)
+    write_text(services_dir / "index.ts", "export * from './api';\n")
 
 
 def _generate_components(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate React components using separate LLM calls for each."""
+    """Generate React components - each in its own file."""
     components_dir = project_dir / "src/components"
-    common_dir = components_dir / "common"
-    layout_dir = components_dir / "layout"
-    
     components_list = structure.get("components", [])
-    generated_components = []
     
-    # Categorize components
-    layout_components = ["Header", "Footer", "Sidebar", "Layout", "Navbar", "Navigation"]
-    common_components = ["Button", "Input", "Card", "Modal", "Loader", "FormInput", "SearchBar"]
+    if not components_list:
+        return
+    
+    layout_keywords = ["Header", "Footer", "Sidebar", "Layout", "Navbar", "Navigation", "Nav"]
+    ui_keywords = ["Button", "Input", "Card", "Modal", "Loader", "Spinner", "Badge"]
+    
+    generated: Dict[str, List[str]] = {"root": [], "layout": [], "ui": []}
+    type_names = [t.get("name") for t in structure.get("types", [])]
+    hook_names = [h.get("name") for h in structure.get("hooks", [])]
     
     for component in components_list:
         comp_name = component.get("name", "Component")
         comp_purpose = component.get("purpose", "")
         comp_props = component.get("props", [])
+        comp_category = component.get("category", "feature")
         
-        # Determine which folder
-        if comp_name in layout_components:
-            target_dir = layout_dir
-        elif comp_name in common_components:
-            target_dir = common_dir
+        # Determine target directory
+        if comp_name in layout_keywords or comp_category == "layout":
+            target_dir = components_dir / "layout"
+            category_key = "layout"
+        elif comp_name in ui_keywords or comp_category == "ui":
+            target_dir = components_dir / "ui"
+            category_key = "ui"
         else:
             target_dir = components_dir
+            category_key = "root"
         
-        component_prompt = f"""Generate a React TypeScript component named {comp_name}.
+        ensure_dir(target_dir)
+        
+        comp_prompt = f"""Generate a React component: {comp_name}
 
 Purpose: {comp_purpose}
 Props: {comp_props}
 Application context: {prompt}
 
+Available imports:
+- Types from '@/types': {type_names}
+- Hooks from '@/hooks': {hook_names}
+
 Requirements:
-- Use TypeScript with a Props interface
-- Use Tailwind CSS for styling
-- Make it functional and reusable
-- Include proper accessibility attributes
-- Handle edge cases (loading, empty, error states if applicable)
-- Use React.FC or function component syntax
+- TypeScript with Props interface
+- Tailwind CSS for styling
+- Functional component
+- Handle edge cases (empty, loading if applicable)
+- Accessibility attributes where needed
+- Export as default
 
-Structure:
-1. Imports
-2. Props interface
-3. Component function
-4. Default export
+Return ONLY the component code, no markdown code blocks."""
 
-Return ONLY the component code."""
-
-        component_code = llm.generate_code(
-            component_prompt,
+        comp_code = llm.generate_code(
+            comp_prompt,
             system=FRONTEND_SYSTEM_PROMPT,
             temperature=0.4,
-            max_tokens=2048
+            max_tokens=COMPONENT_MAX_TOKENS
         )
         
-        component_code = _clean_code_response(component_code, "tsx")
+        comp_code = _clean_code_response(comp_code)
         
-        # Ensure proper export
-        if "export default" not in component_code and "export {" not in component_code:
-            component_code += f"\n\nexport default {comp_name};\n"
+        if "export default" not in comp_code:
+            comp_code += f"\n\nexport default {comp_name};\n"
         
-        write_text(target_dir / f"{comp_name}.tsx", component_code)
-        generated_components.append({"name": comp_name, "dir": target_dir.name})
-        log.debug(f"Generated component: {comp_name}")
+        write_text(target_dir / f"{comp_name}.tsx", comp_code)
+        generated[category_key].append(comp_name)
+        log.debug(f"Generated component: {comp_name} in {category_key}")
     
-    # Generate index files for each component directory
-    _generate_component_index(components_dir, generated_components)
-    _generate_component_index(common_dir, [c for c in generated_components if c["dir"] == "common"])
-    _generate_component_index(layout_dir, [c for c in generated_components if c["dir"] == "layout"])
-
-
-def _generate_component_index(dir_path: Path, components: List[Dict]) -> None:
-    """Generate index.ts for a components directory."""
-    if not components:
-        write_text(dir_path / "index.ts", "// Components will be exported here\nexport {}\n")
-        return
+    # Generate index files
+    for category, names in generated.items():
+        if not names:
+            continue
+        
+        if category == "root":
+            target_dir = components_dir
+        else:
+            target_dir = components_dir / category
+        
+        index_lines = [f"export {{ default as {n} }} from './{n}';" for n in names]
+        write_text(target_dir / "index.ts", "\n".join(index_lines) + "\n")
     
-    exports = []
-    for comp in components:
-        name = comp["name"]
-        exports.append(f"export {{ default as {name} }} from './{name}';")
+    # Main components index
+    main_exports = []
+    if generated["root"]:
+        main_exports.extend([f"export {{ {n} }} from './{n}';" for n in generated["root"]])
+    if generated["layout"]:
+        main_exports.append("export * from './layout';")
+    if generated["ui"]:
+        main_exports.append("export * from './ui';")
     
-    write_text(dir_path / "index.ts", "\n".join(exports) + "\n")
+    if main_exports:
+        write_text(components_dir / "index.ts", "\n".join(main_exports) + "\n")
 
 
 def _generate_pages(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
     """Generate page components."""
     pages_dir = project_dir / "src/pages"
     pages_list = structure.get("pages", [])
-    generated_pages = []
     
-    # Get component names for imports
+    if not pages_list:
+        return
+    
     component_names = [c.get("name") for c in structure.get("components", [])]
     hook_names = [h.get("name") for h in structure.get("hooks", [])]
+    type_names = [t.get("name") for t in structure.get("types", [])]
+    
+    generated_pages = []
     
     for page in pages_list:
         page_name = page.get("name", "Page")
         page_route = page.get("route", "/")
         page_purpose = page.get("purpose", "")
         
-        page_prompt = f"""Generate a React TypeScript page component named {page_name}.
+        page_prompt = f"""Generate a React page component: {page_name}
 
 Route: {page_route}
 Purpose: {page_purpose}
-Application context: {prompt}
+Application: {prompt}
 
-Available components to import from '@components': {component_names}
-Available hooks to import from '@hooks': {hook_names}
+Available imports:
+- Components from '@/components': {component_names}
+- Hooks from '@/hooks': {hook_names}
+- Types from '@/types': {type_names}
 
 Requirements:
-- Use TypeScript
-- Import and use relevant components from the list above
-- Use Tailwind CSS for layout and styling
-- Handle loading, error, and empty states
-- Include proper page structure (header area, main content, etc.)
-- Use hooks for data fetching if needed
+- TypeScript
+- Use available components and hooks
+- Tailwind CSS layout
+- Handle loading/error/empty states
+- Proper page structure
+- Export as default
 
-Return ONLY the page component code."""
+Return ONLY the code."""
 
         page_code = llm.generate_code(
             page_prompt,
             system=FRONTEND_SYSTEM_PROMPT,
             temperature=0.4,
-            max_tokens=3000
+            max_tokens=COMPONENT_MAX_TOKENS
         )
         
-        page_code = _clean_code_response(page_code, "tsx")
+        page_code = _clean_code_response(page_code)
         
         if "export default" not in page_code:
             page_code += f"\n\nexport default {page_name};\n"
         
         write_text(pages_dir / f"{page_name}.tsx", page_code)
         generated_pages.append(page_name)
-        log.debug(f"Generated page: {page_name}")
     
     # Generate pages index
-    exports = [f"export {{ default as {p} }} from './{p}';" for p in generated_pages]
-    write_text(pages_dir / "index.ts", "\n".join(exports) + "\n" if exports else "export {}\n")
+    if generated_pages:
+        index_lines = [f"export {{ default as {p} }} from './{p}';" for p in generated_pages]
+        write_text(pages_dir / "index.ts", "\n".join(index_lines) + "\n")
 
 
 def _generate_app(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate the main App component with routing."""
+    """Generate the main App.tsx."""
     pages = structure.get("pages", [])
     components = structure.get("components", [])
-    has_routing = structure.get("has_routing", len(pages) > 1)
+    has_routing = structure.get("has_routing", False)
     
-    # Get layout components
-    layout_names = [c.get("name") for c in components if c.get("name") in ["Header", "Footer", "Navbar", "Sidebar", "Layout"]]
-    page_names = [p.get("name") for p in pages]
-    routes = [(p.get("name"), p.get("route", "/")) for p in pages]
+    page_routes = [(p.get("name"), p.get("route", "/")) for p in pages]
+    layout_components = [c.get("name") for c in components if c.get("category") == "layout" or c.get("name") in ["Header", "Footer", "Navbar", "Layout"]]
     
-    app_prompt = f"""Generate the main App.tsx for a React application.
+    app_prompt = f"""Generate App.tsx for this React application.
 
 Application: {prompt}
-Has routing: {has_routing}
-Pages and routes: {routes}
-Layout components available: {layout_names}
+Uses routing: {has_routing}
+Pages and routes: {page_routes}
+Layout components available: {layout_components}
 
 Requirements:
-- Import pages from '@pages'
-- Import layout components from '@components/layout' if available
-- {"Use React Router for routing with BrowserRouter, Routes, and Route" if has_routing else "Render the main page directly"}
-- Include a layout wrapper with Header/Footer if available
-- Use Tailwind CSS
-- TypeScript with proper types
+- Import pages from '@/pages'
+- Import layout components from '@/components' if available
+{"- Use BrowserRouter, Routes, Route from react-router-dom" if has_routing else "- Render the main page directly"}
+- Wrap with layout components if available (Header, Footer)
+- TypeScript
+- Tailwind CSS
 
-Return ONLY the App.tsx code."""
+Return ONLY the code."""
 
     app_code = llm.generate_code(
         app_prompt,
         system=FRONTEND_SYSTEM_PROMPT,
         temperature=0.3,
-        max_tokens=2048
+        max_tokens=3000
     )
     
-    app_code = _clean_code_response(app_code, "tsx")
+    app_code = _clean_code_response(app_code)
     
     if "export default" not in app_code:
         app_code += "\n\nexport default App;\n"
@@ -862,8 +724,9 @@ Return ONLY the App.tsx code."""
     write_text(project_dir / "src/App.tsx", app_code)
 
 
-def _generate_main_entry(project_dir: Path) -> None:
+def _generate_main_entry(project_dir: Path, structure: Dict[str, Any]) -> None:
     """Generate main.tsx entry point."""
+    # Simple main.tsx - routing is handled in App.tsx
     main_tsx = '''import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
@@ -878,76 +741,28 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     write_text(project_dir / "src/main.tsx", main_tsx)
 
 
-def _generate_tests(project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate test files for components."""
-    components = structure.get("components", [])[:3]  # Limit to avoid too many LLM calls
-    
-    for component in components:
-        comp_name = component.get("name", "Component")
-        
-        test_prompt = f"""Generate Jest + React Testing Library tests for a React component named {comp_name}.
-
-Purpose: {component.get('purpose', '')}
-Props: {component.get('props', [])}
-
-Include:
-1. Render test (component renders without crashing)
-2. Snapshot test or content test
-3. User interaction test if applicable
-4. Props test
-
-Use TypeScript. Import from '@testing-library/react'.
-Return ONLY the test code."""
-
-        test_code = llm.generate_code(
-            test_prompt,
-            system=FRONTEND_SYSTEM_PROMPT,
-            temperature=0.3,
-            max_tokens=1500
-        )
-        
-        test_code = _clean_code_response(test_code, "tsx")
-        write_text(project_dir / f"src/components/{comp_name}.test.tsx", test_code)
-    
-    # Generate App test
-    app_test = '''import { render, screen } from '@testing-library/react'
-import React from 'react'
-import App from './App'
-
-describe('App', () => {
-  it('renders without crashing', () => {
-    render(<App />)
-  })
-
-  it('displays main content', () => {
-    render(<App />)
-    // App should render some content
-    expect(document.body).toBeInTheDocument()
-  })
-})
-'''
-    write_text(project_dir / "src/App.test.tsx", app_test)
-
-
-def _clean_code_response(code: str, lang: str = "typescript") -> str:
-    """Clean up LLM code response by removing markdown code blocks."""
+def _clean_code_response(code: str) -> str:
+    """Clean up LLM code response."""
     # Remove markdown code blocks
-    code = re.sub(r'^```(?:typescript|tsx|ts|javascript|jsx|js)?\s*\n?', '', code, flags=re.MULTILINE)
+    code = re.sub(r'^```(?:typescript|tsx|ts|javascript|jsx|js|json)?\s*\n?', '', code, flags=re.MULTILINE)
     code = re.sub(r'\n?```\s*$', '', code, flags=re.MULTILINE)
     code = code.strip()
     
-    # Ensure imports are at the top
+    # Organize imports at top
     lines = code.split('\n')
     imports = []
     other = []
     
     for line in lines:
-        if line.strip().startswith('import ') or line.strip().startswith('import{'):
+        stripped = line.strip()
+        if stripped.startswith('import ') or stripped.startswith('import{'):
             imports.append(line)
         else:
             other.append(line)
     
     if imports:
+        # Remove duplicate imports
+        imports = list(dict.fromkeys(imports))
         return '\n'.join(imports) + '\n\n' + '\n'.join(other).strip()
     
     return code
