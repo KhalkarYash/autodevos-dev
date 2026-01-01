@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 import time
-from typing import Optional, Iterator
+from typing import Optional, Iterator, Tuple
 from functools import wraps
 from pathlib import Path
 from dotenv import load_dotenv
@@ -10,6 +11,15 @@ from dotenv import load_dotenv
 from .utils import log
 
 load_dotenv()
+
+# Continuation prompt template for resuming truncated responses
+CONTINUATION_PROMPT = """Continue from the exact point below. Do not repeat content. Do not summarize.
+
+Last output:
+{tail}"""
+
+# System prompt addition for clean truncation
+TRUNCATION_HINT = "\nIf the response exceeds token limits, pause cleanly at a sentence or code block boundary."
 
 class LLMConfigError(Exception):
     """Raised when LLM configuration is invalid."""
@@ -130,6 +140,77 @@ class GeminiLLM(BaseLLM):
         jitter = (time.time() % 1) * 0.1 * backoff  # 0-10% jitter
         return backoff + jitter
 
+    def _is_response_incomplete(self, text: str) -> bool:
+        """
+        Detect if the response appears to be truncated using heuristics.
+        
+        Checks for:
+        - Unclosed code blocks (```)
+        - Unclosed brackets/braces
+        - Mid-sentence endings
+        - Unclosed strings
+        """
+        if not text:
+            return False
+        
+        text = text.strip()
+        
+        # Check for unclosed markdown code blocks
+        code_block_count = text.count("```")
+        if code_block_count % 2 != 0:
+            log.debug("Detected unclosed code block")
+            return True
+        
+        # Check for unclosed brackets/braces (simple heuristic)
+        # Only check if we're clearly in code context
+        open_braces = text.count("{") - text.count("}")
+        open_brackets = text.count("[") - text.count("]")
+        open_parens = text.count("(") - text.count(")")
+        
+        if open_braces > 2 or open_brackets > 2 or open_parens > 2:
+            log.debug(f"Detected unclosed brackets: braces={open_braces}, brackets={open_brackets}, parens={open_parens}")
+            return True
+        
+        # Check for mid-sentence ending (doesn't end with common terminators)
+        last_chars = text[-50:] if len(text) > 50 else text
+        # Look for sentence/code endings
+        clean_endings = (
+            last_chars.rstrip().endswith(('.', '!', '?', ';', '}', ']', ')', '`', '"', "'", '\n'))
+            or last_chars.rstrip().endswith(('```', '---', '***'))
+        )
+        
+        if not clean_endings:
+            log.debug("Detected mid-sentence/mid-code truncation")
+            return True
+        
+        return False
+
+    def _extract_finish_reason(self, response) -> Optional[str]:
+        """Extract finish_reason from Gemini response."""
+        try:
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'finish_reason'):
+                    # Gemini uses enum, convert to string
+                    reason = candidate.finish_reason
+                    if hasattr(reason, 'name'):
+                        return reason.name.lower()
+                    return str(reason).lower()
+        except Exception as e:
+            log.debug(f"Could not extract finish_reason: {e}")
+        return None
+
+    def _extract_text_from_response(self, response) -> str:
+        """Extract text content from Gemini response."""
+        if hasattr(response, 'text'):
+            return response.text or ""
+        elif hasattr(response, 'candidates') and response.candidates:
+            try:
+                return response.candidates[0].content.parts[0].text or ""
+            except (IndexError, AttributeError):
+                pass
+        return str(response)
+
     def _retry_with_backoff(self, func, *args, **kwargs):
         """Execute function with exponential backoff retry logic."""
         last_error = None
@@ -158,19 +239,140 @@ class GeminiLLM(BaseLLM):
         
         raise LLMAPIError(f"Gemini API failed after {self.max_retries} retries") from last_error
     
-    def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 8192) -> str:
-        """Generate code with production error handling and fallback."""
+    def generate_code(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, 
+                      max_tokens: int = 8192, max_continuations: int = 5, tail_length: int = 400) -> str:
+        """
+        Generate code with automatic continuation for long/truncated outputs.
+        
+        Args:
+            prompt: The main prompt for generation
+            system: Optional system message
+            temperature: Generation temperature (0.0-1.0)
+            max_tokens: Maximum tokens per generation call
+            max_continuations: Maximum number of continuation requests (default: 5)
+            tail_length: Number of characters from end of response to include in continuation (default: 400)
+        
+        Returns:
+            Complete generated text, potentially from multiple continuation calls
+        """
         if self._client is None:
             log.debug("Gemini client not initialized, using MockLLM fallback")
             return MockLLM().generate_code(prompt, system, temperature, max_tokens)
         
+        # Add truncation hint to system prompt for cleaner breaks
+        enhanced_system = (system or "") + TRUNCATION_HINT
+        
+        output = ""
+        continuation_count = 0
+        current_prompt = prompt
+        
         try:
-            def _generate():
+            while continuation_count <= max_continuations:
+                is_continuation = continuation_count > 0
+                
+                def _generate():
+                    # Construct full prompt
+                    if enhanced_system:
+                        full_prompt = f"{enhanced_system}\n\n{current_prompt}"
+                    else:
+                        full_prompt = current_prompt
+                    
+                    generation_config = {
+                        "temperature": temperature,
+                        "max_output_tokens": max_tokens,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                    }
+                    
+                    # Generate with timeout handling
+                    start_time = time.time()
+                    response = self._client.generate_content(
+                        full_prompt, 
+                        generation_config=generation_config,
+                        request_options={"timeout": self.timeout}
+                    )
+                    
+                    elapsed = time.time() - start_time
+                    
+                    # Extract text and finish reason
+                    text = self._extract_text_from_response(response)
+                    finish_reason = self._extract_finish_reason(response)
+                    
+                    log.debug(f"Gemini generation completed in {elapsed:.2f}s ({len(text)} chars), finish_reason={finish_reason}")
+                    return text, finish_reason
+                
+                text, finish_reason = self._retry_with_backoff(_generate)
+                output += text
+                
+                # Check if we need to continue
+                is_truncated = (
+                    finish_reason in ('max_tokens', 'length', 'stop_sequence') or
+                    self._is_response_incomplete(output)
+                )
+                
+                if not is_truncated or finish_reason == 'stop':
+                    log.debug(f"Generation complete after {continuation_count + 1} call(s), total {len(output)} chars")
+                    break
+                
+                # Prepare continuation
+                continuation_count += 1
+                if continuation_count > max_continuations:
+                    log.warning(f"Reached max continuations ({max_continuations}), returning partial output")
+                    break
+                
+                # Check for repetition (safety against infinite loops)
+                tail = output[-tail_length:] if len(output) > tail_length else output
+                if continuation_count > 1:
+                    prev_tail = output[-(tail_length * 2):-tail_length] if len(output) > tail_length * 2 else ""
+                    if prev_tail and tail == prev_tail:
+                        log.warning("Detected repetition in output, stopping continuation")
+                        break
+                
+                log.info(f"Response truncated (reason={finish_reason}), requesting continuation {continuation_count}/{max_continuations}")
+                current_prompt = CONTINUATION_PROMPT.format(tail=tail)
+            
+            return output
+            
+        except LLMAPIError:
+            raise  # Re-raise API errors
+        except Exception as e:
+            log.error(f"Unexpected Gemini error: {e}, using MockLLM fallback")
+            return MockLLM().generate_code(prompt, system, temperature, max_tokens)
+    
+    def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, 
+                           max_tokens: int = 8192, max_continuations: int = 5, tail_length: int = 400) -> Iterator[str]:
+        """
+        Generate code with streaming response, automatic continuation, and error handling.
+        
+        Args:
+            prompt: The main prompt for generation
+            system: Optional system message
+            temperature: Generation temperature (0.0-1.0)
+            max_tokens: Maximum tokens per generation call
+            max_continuations: Maximum number of continuation requests
+            tail_length: Number of characters from end to include in continuation prompt
+        
+        Yields:
+            Text chunks as they are generated
+        """
+        if self._client is None:
+            yield MockLLM().generate_code(prompt, system, temperature, max_tokens)
+            return
+        
+        # Add truncation hint to system prompt
+        enhanced_system = (system or "") + TRUNCATION_HINT
+        
+        output = ""
+        continuation_count = 0
+        current_prompt = prompt
+        
+        try:
+            while continuation_count <= max_continuations:
                 # Construct full prompt
-                if system:
-                    full_prompt = f"{system}\n\n{prompt}"
+                if enhanced_system:
+                    full_prompt = f"{enhanced_system}\n\n{current_prompt}"
                 else:
-                    full_prompt = prompt
+                    full_prompt = current_prompt
                 
                 generation_config = {
                     "temperature": temperature,
@@ -179,65 +381,53 @@ class GeminiLLM(BaseLLM):
                     "top_k": 40,
                 }
                 
-                # Generate with timeout handling
-                start_time = time.time()
                 response = self._client.generate_content(
                     full_prompt, 
-                    generation_config=generation_config,
+                    generation_config=generation_config, 
+                    stream=True,
                     request_options={"timeout": self.timeout}
                 )
                 
-                elapsed = time.time() - start_time
+                chunk_text = ""
+                finish_reason = None
                 
-                # Extract text from response
-                if hasattr(response, 'text'):
-                    text = response.text
-                elif hasattr(response, 'candidates') and response.candidates:
-                    text = response.candidates[0].content.parts[0].text
-                else:
-                    text = str(response)
+                for chunk in response:
+                    if hasattr(chunk, 'text') and chunk.text:
+                        chunk_text += chunk.text
+                        output += chunk.text
+                        yield chunk.text
+                    
+                    # Try to get finish_reason from last chunk
+                    reason = self._extract_finish_reason(chunk)
+                    if reason:
+                        finish_reason = reason
                 
-                log.debug(f"Gemini generation completed in {elapsed:.2f}s ({len(text)} chars)")
-                return text or ""
-            
-            return self._retry_with_backoff(_generate)
-            
-        except LLMAPIError:
-            raise  # Re-raise API errors
-        except Exception as e:
-            log.error(f"Unexpected Gemini error: {e}, using MockLLM fallback")
-            return MockLLM().generate_code(prompt, system, temperature, max_tokens)
-    
-    def generate_streaming(self, prompt: str, system: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 8192) -> Iterator[str]:
-        """Generate code with streaming response and error handling."""
-        if self._client is None:
-            yield MockLLM().generate_code(prompt, system, temperature, max_tokens)
-            return
-        
-        try:
-            # Construct full prompt
-            if system:
-                full_prompt = f"{system}\n\n{prompt}"
-            else:
-                full_prompt = prompt
-            
-            generation_config = {
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-                "top_p": 0.95,
-                "top_k": 40,
-            }
-            
-            response = self._client.generate_content(
-                full_prompt, 
-                generation_config=generation_config, 
-                stream=True,
-                request_options={"timeout": self.timeout}
-            )
-            
-            for chunk in response:
-                if hasattr(chunk, 'text') and chunk.text:
-                    yield chunk.text
+                # Check if we need to continue
+                is_truncated = (
+                    finish_reason in ('max_tokens', 'length', 'stop_sequence') or
+                    self._is_response_incomplete(output)
+                )
+                
+                if not is_truncated or finish_reason == 'stop':
+                    log.debug(f"Streaming complete after {continuation_count + 1} call(s)")
+                    break
+                
+                # Prepare continuation
+                continuation_count += 1
+                if continuation_count > max_continuations:
+                    log.warning(f"Reached max continuations ({max_continuations})")
+                    break
+                
+                # Check for repetition
+                tail = output[-tail_length:] if len(output) > tail_length else output
+                if continuation_count > 1:
+                    prev_tail = output[-(tail_length * 2):-tail_length] if len(output) > tail_length * 2 else ""
+                    if prev_tail and tail == prev_tail:
+                        log.warning("Detected repetition, stopping continuation")
+                        break
+                
+                log.info(f"Streaming truncated, requesting continuation {continuation_count}/{max_continuations}")
+                current_prompt = CONTINUATION_PROMPT.format(tail=tail)
                     
         except Exception as e:
             log.error(f"Gemini streaming failed: {e}, falling back to non-streaming")
