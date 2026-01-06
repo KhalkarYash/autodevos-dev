@@ -34,18 +34,21 @@ class TestOrchestrator:
         assert "documentation" in orchestrator.agent_registry
     
     def test_default_plan(self, orchestrator):
-        """Test default plan generation."""
+        """Test default plan generation - documentation runs FIRST."""
         plan = orchestrator._default_plan()
         
         assert len(plan) == 4
-        assert plan[0]["id"] == "frontend"
-        assert plan[1]["id"] == "backend"
-        assert plan[2]["id"] == "testing"
-        assert plan[3]["id"] == "documentation"
+        # Documentation now runs FIRST
+        assert plan[0]["id"] == "documentation"
+        assert plan[1]["id"] == "frontend"
+        assert plan[2]["id"] == "backend"
+        assert plan[3]["id"] == "testing"
         
-        # Check dependencies
-        assert plan[2]["depends_on"] == ["frontend", "backend"]
-        assert plan[3]["depends_on"] == ["frontend", "backend", "testing"]
+        # Check dependencies - frontend/backend depend on documentation
+        assert plan[0]["depends_on"] == []  # documentation has no dependencies
+        assert plan[1]["depends_on"] == ["documentation"]  # frontend depends on docs
+        assert plan[2]["depends_on"] == ["documentation"]  # backend depends on docs
+        assert plan[3]["depends_on"] == ["frontend", "backend"]  # testing depends on both
     
     def test_validate_task_spec_valid(self, orchestrator):
         """Test task spec validation with valid input."""
@@ -107,12 +110,12 @@ class TestOrchestrator:
         assert validated[0]["depends_on"] == []
     
     def test_static_planning(self, orchestrator):
-        """Test static planning mode."""
+        """Test static planning mode - documentation runs first."""
         plan = orchestrator.plan("create a web app")
         
-        # Should return default plan in static mode
+        # Should return default plan in static mode - doc first
         assert len(plan) == 4
-        assert plan[0]["id"] == "frontend"
+        assert plan[0]["id"] == "documentation"
     
     @pytest.mark.asyncio
     async def test_run_execution(self, orchestrator, temp_dir):

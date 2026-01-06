@@ -58,6 +58,34 @@ class MCPContext:
             self.version += 1
             self.append_event("artifact", artifact_info)
 
+    def set_api_contract(self, contract: Dict[str, Any]) -> None:
+        """Store API contract for use by frontend and backend agents."""
+        with self._lock:
+            self.data["api_contract"] = contract
+            self.version += 1
+            self.append_event("api_contract_set", {"endpoints_count": len(contract.get("endpoints", []))})
+            log.info(f"API contract set with {len(contract.get('endpoints', []))} endpoints")
+
+    def get_api_contract(self) -> Optional[Dict[str, Any]]:
+        """Retrieve API contract."""
+        with self._lock:
+            return self.data.get("api_contract")
+
+    def set_generated_files(self, agent: str, files: Dict[str, str]) -> None:
+        """Store generated files in key-value format (path: code)."""
+        with self._lock:
+            generated = self.data.setdefault("generated_files", {})
+            generated[agent] = files
+            self.version += 1
+            self.append_event("files_generated", {"agent": agent, "file_count": len(files)})
+            log.info(f"Agent '{agent}' generated {len(files)} files")
+
+    def get_generated_files(self, agent: str) -> Optional[Dict[str, str]]:
+        """Retrieve generated files for an agent."""
+        with self._lock:
+            generated = self.data.get("generated_files", {})
+            return generated.get(agent)
+
     def save(self) -> None:
         """Thread-safe context persistence with atomic write and file locking.""" 
         with self._lock:

@@ -112,26 +112,27 @@ class Orchestrator:
 You are a software architecture planner. Given a user request, identify what components need to be built.
 
 Available agents:
-- frontend: React + TypeScript UI (always include for web apps)
-- backend: Node.js + Express API (include if API/server needed)
-- testing: Integration tests (include after frontend/backend)
-- documentation: Project documentation (include last)
+- documentation: MUST RUN FIRST - Creates API contracts and specifications
+- frontend: React + TypeScript UI (runs AFTER documentation)
+- backend: Node.js + Express API (runs AFTER documentation)
+- testing: Integration tests (runs after frontend/backend)
 
 User Request: {prompt}
 
 Return a JSON array of tasks with this EXACT structure:
 {{
   "tasks": [
-    {{"id": "frontend", "name": "Generate React Frontend", "depends_on": []}},
-    {{"id": "backend", "name": "Generate Express Backend", "depends_on": []}},
-    {{"id": "testing", "name": "Generate Tests", "depends_on": ["frontend", "backend"]}},
-    {{"id": "documentation", "name": "Generate Docs", "depends_on": ["frontend", "backend", "testing"]}}
+    {{"id": "documentation", "name": "Generate API Contracts & Specs", "depends_on": []}},
+    {{"id": "frontend", "name": "Generate React Frontend", "depends_on": ["documentation"]}},
+    {{"id": "backend", "name": "Generate Express Backend", "depends_on": ["documentation"]}},
+    {{"id": "testing", "name": "Generate Tests", "depends_on": ["frontend", "backend"]}}
   ]
 }}
 
 Important:
-- Only include relevant components (e.g., skip frontend for CLI tools)
-- Set dependencies correctly (testing comes after code generation, docs come last)
+- Documentation ALWAYS runs first to define API contracts that frontend/backend must follow
+- Frontend and Backend ALWAYS depend on documentation
+- Testing comes after code generation
 - Use only available agent IDs: frontend, backend, testing, documentation
 - Each task MUST have "id" and "name" fields
 - "depends_on" must be an array of task IDs
@@ -186,12 +187,12 @@ Return ONLY valid JSON, no other text.
             return self._default_plan()
     
     def _default_plan(self) -> List[Dict[str, Any]]:
-        """Fallback static plan."""
+        """Fallback static plan - Documentation runs FIRST to define API contracts."""
         return [
-            {"id": "frontend", "name": "Generate Frontend", "depends_on": []},
-            {"id": "backend", "name": "Generate Backend", "depends_on": []},
-            {"id": "testing", "name": "Generate Tests", "depends_on": ["frontend", "backend"]},
-            {"id": "documentation", "name": "Generate Documentation", "depends_on": ["frontend", "backend", "testing"]}
+            {"id": "documentation", "name": "Generate API Contracts & Documentation", "depends_on": []},
+            {"id": "frontend", "name": "Generate Frontend", "depends_on": ["documentation"]},
+            {"id": "backend", "name": "Generate Backend", "depends_on": ["documentation"]},
+            {"id": "testing", "name": "Generate Tests", "depends_on": ["frontend", "backend"]}
         ]
     
     def plan(self, prompt: str) -> List[Dict[str, Any]]:

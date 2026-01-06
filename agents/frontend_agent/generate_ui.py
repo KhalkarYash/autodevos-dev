@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from meta_agent.utils import ensure_dir, write_text, write_json, log
 from meta_agent.llm_interface import BaseLLM
@@ -19,7 +19,8 @@ Generate clean, production-ready code following these rules:
 - Include proper error handling
 - Make components reusable and modular
 - Return ONLY code, no explanations or markdown code blocks
-- Do NOT wrap code in markdown code fences"""
+- Do NOT wrap code in markdown code fences
+- STRICTLY follow the API contract provided - do not deviate from it"""
 
 # Higher token limits for larger generations
 DEFAULT_MAX_TOKENS = 16384
@@ -27,17 +28,29 @@ COMPONENT_MAX_TOKENS = 8192
 ANALYSIS_MAX_TOKENS = 4096
 
 
-def generate_ui(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> None:
+def generate_ui(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> Dict[str, str]:
     """Generate a modular React+TypeScript frontend using Vite and Tailwind CSS.
     
-    The structure is fully dynamic - only files needed for the application are created.
-    No hardcoded/compulsory files beyond the essential Vite config.
+    Uses API contract from documentation agent to ensure consistency with backend.
+    
+    Returns:
+        Dict[str, str]: Key-value pairs where key is file path and value is file content
     """
     project_dir = out_dir
     
-    # 1. Analyze requirements FIRST to determine what to generate
+    # Get API contract from documentation agent
+    api_contract = ctx.get_api_contract()
+    if api_contract:
+        log.info(f"Using API contract with {len(api_contract.get('endpoints', []))} endpoints")
+    else:
+        log.warning("No API contract found - generating without contract constraints")
+    
+    # Track all generated files for key-value output
+    generated_files: Dict[str, str] = {}
+    
+    # 1. Analyze requirements using API contract
     log.info("Analyzing frontend requirements...")
-    structure = _analyze_requirements(prompt, llm)
+    structure = _analyze_requirements_with_contract(prompt, llm, api_contract)
     log.info(f"App: {structure.get('app_name')}")
     log.info(f"Components to generate: {[c.get('name') for c in structure.get('components', [])]}")
     log.info(f"Pages to generate: {[p.get('name') for p in structure.get('pages', [])]}")
@@ -48,40 +61,131 @@ def generate_ui(prompt: str, ctx: MCPContext, out_dir: Path, llm: BaseLLM) -> No
     
     # 3. Generate essential Vite config files (these are always needed)
     log.info("Generating Vite configuration...")
-    _generate_vite_config(project_dir, structure)
+    config_files = _generate_vite_config(project_dir, structure, api_contract)
+    generated_files.update(config_files)
     
-    # 4. Generate types ONLY if there are types defined
+    # 4. Generate types ONLY if there are types defined (based on API contract)
     if structure.get("types"):
         log.info("Generating TypeScript types...")
-        _generate_types(prompt, project_dir, llm, structure)
+        type_files = _generate_types(prompt, project_dir, llm, structure, api_contract)
+        generated_files.update(type_files)
     
     # 5. Generate hooks ONLY if there are hooks defined
     if structure.get("hooks"):
         log.info("Generating custom hooks...")
-        _generate_hooks(prompt, project_dir, llm, structure)
+        hook_files = _generate_hooks(prompt, project_dir, llm, structure, api_contract)
+        generated_files.update(hook_files)
     
-    # 6. Generate services ONLY if API endpoints exist
-    if structure.get("api_endpoints"):
-        log.info("Generating API services...")
-        _generate_services(prompt, project_dir, llm, structure)
+    # 6. Generate services based on API contract
+    if api_contract and api_contract.get("endpoints"):
+        log.info("Generating API services from contract...")
+        service_files = _generate_services_from_contract(prompt, project_dir, llm, structure, api_contract)
+        generated_files.update(service_files)
     
     # 7. Generate components
     if structure.get("components"):
         log.info("Generating components...")
-        _generate_components(prompt, project_dir, llm, structure)
+        component_files = _generate_components(prompt, project_dir, llm, structure, api_contract)
+        generated_files.update(component_files)
     
     # 8. Generate pages
     if structure.get("pages"):
         log.info("Generating pages...")
-        _generate_pages(prompt, project_dir, llm, structure)
+        page_files = _generate_pages(prompt, project_dir, llm, structure, api_contract)
+        generated_files.update(page_files)
     
     # 9. Generate App and main entry (always needed)
     log.info("Generating App entry point...")
-    _generate_app(prompt, project_dir, llm, structure)
-    _generate_main_entry(project_dir, structure)
+    app_files = _generate_app(prompt, project_dir, llm, structure, api_contract)
+    generated_files.update(app_files)
+    main_files = _generate_main_entry(project_dir, structure)
+    generated_files.update(main_files)
 
+    # Store generated files in context for other agents
+    ctx.set_generated_files("frontend", generated_files)
     ctx.add_artifact("frontend", project_dir)
+    
     log.info(f"Frontend generated at: {project_dir}")
+    log.info(f"Generated {len(generated_files)} files")
+    
+    return generated_files
+
+
+def _analyze_requirements_with_contract(prompt: str, llm: BaseLLM, api_contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Use LLM to analyze prompt and API contract to determine exactly what files to generate."""
+    
+    # Extract info from API contract if available
+    contract_endpoints = []
+    contract_models = []
+    if api_contract:
+        contract_endpoints = api_contract.get("endpoints", [])
+        contract_models = api_contract.get("models", [])
+    
+    analysis_prompt = f"""Analyze this application requirement and API contract to determine what frontend files need to be built.
+
+Requirement: {prompt}
+
+API Contract Endpoints:
+{json.dumps(contract_endpoints, indent=2) if contract_endpoints else "No API contract provided"}
+
+API Models to implement:
+{json.dumps(contract_models, indent=2) if contract_models else "No models provided"}
+
+Return a JSON object with this EXACT structure. Be SPECIFIC - derive from the API contract:
+
+{{
+  "app_name": "kebab-case-name-based-on-app",
+  "description": "One line description",
+  "components": [
+    {{"name": "ExactComponentName", "purpose": "What it does", "props": ["propName"], "category": "layout|ui|feature"}}
+  ],
+  "pages": [
+    {{"name": "PageName", "route": "/exact-path", "purpose": "What this page shows"}}
+  ],
+  "hooks": [
+    {{"name": "useExactHookName", "purpose": "What state/logic it manages"}}
+  ],
+  "types": [
+    {{"name": "TypeName", "purpose": "What data it represents", "fields": {{"fieldName": "type"}}}}
+  ],
+  "api_endpoints": {json.dumps([ep.get("path") for ep in contract_endpoints]) if contract_endpoints else "[]"},
+  "has_auth": {"true" if any(ep.get("auth_required") for ep in contract_endpoints) else "false"},
+  "has_routing": true,
+  "state_management": "context"
+}}
+
+IMPORTANT:
+- Types MUST match the API contract models exactly
+- Components should handle API responses as defined in contract
+- Include auth components if API has auth endpoints
+- Service functions should match API contract exactly
+
+Return ONLY valid JSON."""
+
+    response = llm.generate_code(
+        analysis_prompt, 
+        system="You are an expert software architect. Analyze requirements and API contracts precisely.",
+        temperature=0.2, 
+        max_tokens=ANALYSIS_MAX_TOKENS
+    )
+    
+    # Parse JSON from response
+    try:
+        cleaned = re.sub(r'^```(?:json)?\s*\n?', '', response, flags=re.MULTILINE)
+        cleaned = re.sub(r'\n?```\s*$', '', cleaned, flags=re.MULTILINE)
+        
+        json_match = re.search(r'\{[\s\S]*\}', cleaned)
+        if json_match:
+            parsed = json.loads(json_match.group())
+            if parsed.get("components") or parsed.get("pages"):
+                log.debug(f"Successfully parsed LLM analysis: {len(parsed.get('components', []))} components, {len(parsed.get('pages', []))} pages")
+                return parsed
+    except json.JSONDecodeError as e:
+        log.warning(f"Failed to parse LLM response as JSON: {e}")
+    
+    # Fallback: generate structure based on API contract
+    log.info("Using fallback structure analysis based on API contract")
+    return _generate_fallback_structure_from_contract(prompt, api_contract)
 
 
 def _create_dynamic_folder_structure(project_dir: Path, structure: Dict[str, Any]) -> None:
@@ -185,8 +289,8 @@ Return ONLY valid JSON."""
     return _generate_fallback_structure(prompt)
 
 
-def _generate_fallback_structure(prompt: str) -> Dict[str, Any]:
-    """Generate minimal structure when LLM analysis fails."""
+def _generate_fallback_structure_from_contract(prompt: str, api_contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Generate structure based on API contract when LLM analysis fails."""
     prompt_lower = prompt.lower()
     words = prompt_lower.split()
     
@@ -199,62 +303,63 @@ def _generate_fallback_structure(prompt: str) -> Dict[str, Any]:
     hooks: List[Dict[str, Any]] = []
     types: List[Dict[str, Any]] = []
     api_endpoints: List[str] = []
+    has_auth = False
     
-    # Detect what's actually needed from keywords
-    if any(word in prompt_lower for word in ["todo", "task", "list"]):
-        components.extend([
-            {"name": "TodoList", "purpose": "Display todos", "props": ["todos", "onToggle", "onDelete"], "category": "feature"},
-            {"name": "TodoItem", "purpose": "Single todo", "props": ["todo", "onToggle", "onDelete"], "category": "feature"},
-            {"name": "AddTodoForm", "purpose": "Add new todo", "props": ["onAdd"], "category": "feature"},
-        ])
-        types.append({"name": "Todo", "purpose": "Todo item", "fields": {"id": "string", "text": "string", "completed": "boolean"}})
-        hooks.append({"name": "useTodos", "purpose": "Manage todo state"})
+    # Build from API contract if available
+    if api_contract:
+        endpoints = api_contract.get("endpoints", [])
+        models = api_contract.get("models", [])
+        
+        # Extract endpoints
+        api_endpoints = [ep.get("path") for ep in endpoints if ep.get("path")]
+        
+        # Check for auth
+        has_auth = any(ep.get("auth_required") for ep in endpoints)
+        auth_endpoints = [ep for ep in endpoints if "/auth" in ep.get("path", "")]
+        
+        # Add types from models
+        for model in models:
+            types.append({
+                "name": model,
+                "purpose": f"{model} data type from API",
+                "fields": {}
+            })
+        
+        # Add auth components if needed
+        if auth_endpoints or has_auth:
+            components.extend([
+                {"name": "LoginForm", "purpose": "User login", "props": ["onSubmit"], "category": "feature"},
+                {"name": "RegisterForm", "purpose": "User registration", "props": ["onSubmit"], "category": "feature"},
+            ])
+            pages.append({"name": "LoginPage", "route": "/login", "purpose": "Login page"})
+            pages.append({"name": "RegisterPage", "route": "/register", "purpose": "Registration page"})
+            hooks.append({"name": "useAuth", "purpose": "Authentication state management"})
+        
+        # Add components for resource endpoints
+        resource_endpoints = [ep for ep in endpoints if ep.get("method") in ["GET", "POST"] and "/auth" not in ep.get("path", "")]
+        for ep in resource_endpoints:
+            path = ep.get("path", "")
+            resource_name = path.split("/")[-1].replace(":", "").title()
+            if resource_name and resource_name not in ["Health"]:
+                components.append({
+                    "name": f"{resource_name}List",
+                    "purpose": f"Display {resource_name.lower()} items",
+                    "props": ["items", "onRefresh"],
+                    "category": "feature"
+                })
+                components.append({
+                    "name": f"{resource_name}Form",
+                    "purpose": f"Create/edit {resource_name.lower()}",
+                    "props": ["onSubmit", "initialData"],
+                    "category": "feature"
+                })
+                hooks.append({
+                    "name": f"use{resource_name}",
+                    "purpose": f"Manage {resource_name.lower()} state and API calls"
+                })
     
-    if any(word in prompt_lower for word in ["blog", "post", "article"]):
-        components.extend([
-            {"name": "PostList", "purpose": "List of posts", "props": ["posts"], "category": "feature"},
-            {"name": "PostCard", "purpose": "Post preview", "props": ["post"], "category": "feature"},
-        ])
-        pages.append({"name": "PostPage", "route": "/post/:id", "purpose": "Single post view"})
-        types.append({"name": "Post", "purpose": "Blog post", "fields": {"id": "string", "title": "string", "content": "string", "createdAt": "string"}})
-        api_endpoints.append("/api/posts")
-    
-    if any(word in prompt_lower for word in ["shop", "store", "product", "cart", "ecommerce"]):
-        components.extend([
-            {"name": "ProductGrid", "purpose": "Product listing", "props": ["products"], "category": "feature"},
-            {"name": "ProductCard", "purpose": "Product display", "props": ["product", "onAddToCart"], "category": "feature"},
-            {"name": "Cart", "purpose": "Shopping cart", "props": ["items", "onRemove"], "category": "feature"},
-        ])
-        pages.append({"name": "ProductPage", "route": "/product/:id", "purpose": "Product details"})
-        types.append({"name": "Product", "purpose": "Product item", "fields": {"id": "string", "name": "string", "price": "number", "image": "string"}})
-        hooks.append({"name": "useCart", "purpose": "Cart state management"})
-        api_endpoints.append("/api/products")
-    
-    if any(word in prompt_lower for word in ["dashboard", "admin", "analytics"]):
-        components.extend([
-            {"name": "StatCard", "purpose": "Statistics display", "props": ["title", "value", "change"], "category": "feature"},
-            {"name": "Chart", "purpose": "Data visualization", "props": ["data", "type"], "category": "feature"},
-        ])
-        pages.append({"name": "DashboardPage", "route": "/dashboard", "purpose": "Dashboard view"})
-    
-    if any(word in prompt_lower for word in ["auth", "login", "signup", "register"]):
-        components.extend([
-            {"name": "LoginForm", "purpose": "User login", "props": ["onSubmit"], "category": "feature"},
-        ])
-        pages.append({"name": "LoginPage", "route": "/login", "purpose": "Login page"})
-        hooks.append({"name": "useAuth", "purpose": "Authentication state"})
-    
-    if any(word in prompt_lower for word in ["chat", "message", "conversation"]):
-        components.extend([
-            {"name": "MessageList", "purpose": "Chat messages", "props": ["messages"], "category": "feature"},
-            {"name": "MessageInput", "purpose": "Send message", "props": ["onSend"], "category": "feature"},
-        ])
-        types.append({"name": "Message", "purpose": "Chat message", "fields": {"id": "string", "text": "string", "sender": "string", "timestamp": "string"}})
-        hooks.append({"name": "useMessages", "purpose": "Message handling"})
-    
-    # Add header if app seems complex enough
-    if len(pages) > 1 or len(components) > 2:
-        components.insert(0, {"name": "Header", "purpose": "Navigation", "props": [], "category": "layout"})
+    # Add common layout components
+    components.insert(0, {"name": "Header", "purpose": "Navigation header", "props": [], "category": "layout"})
     
     return {
         "app_name": app_name or "my-app",
@@ -264,16 +369,18 @@ def _generate_fallback_structure(prompt: str) -> Dict[str, Any]:
         "hooks": hooks,
         "types": types,
         "api_endpoints": api_endpoints,
-        "has_auth": any(word in prompt_lower for word in ["auth", "login"]),
+        "has_auth": has_auth,
         "has_routing": len(pages) > 1,
         "state_management": "context" if hooks else "local"
     }
 
 
-def _generate_vite_config(project_dir: Path, structure: Dict[str, Any]) -> None:
-    """Generate essential Vite/React config files."""
+def _generate_vite_config(project_dir: Path, structure: Dict[str, Any], api_contract: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate essential Vite/React config files. Returns generated files as key-value pairs."""
     app_name = structure.get("app_name", "vite-react-app")
     has_routing = structure.get("has_routing", False)
+    
+    generated_files: Dict[str, str] = {}
     
     # Determine dependencies based on what's needed
     dependencies: Dict[str, str] = {
@@ -307,7 +414,9 @@ def _generate_vite_config(project_dir: Path, structure: Dict[str, Any]) -> None:
             "vite": "^5.4.8"
         }
     }
+    pkg_content = json.dumps(pkg, indent=2)
     write_json(project_dir / "package.json", pkg)
+    generated_files["package.json"] = pkg_content
 
     # tsconfig.json
     tsconfig = {
@@ -331,7 +440,9 @@ def _generate_vite_config(project_dir: Path, structure: Dict[str, Any]) -> None:
         },
         "include": ["src"]
     }
+    tsconfig_content = json.dumps(tsconfig, indent=2)
     write_json(project_dir / "tsconfig.json", tsconfig)
+    generated_files["tsconfig.json"] = tsconfig_content
 
     # vite.config.ts
     vite_cfg = '''import { defineConfig } from 'vite'
@@ -348,6 +459,7 @@ export default defineConfig({
 })
 '''
     write_text(project_dir / "vite.config.ts", vite_cfg)
+    generated_files["vite.config.ts"] = vite_cfg
 
     # index.html
     index_html = f'''<!DOCTYPE html>
@@ -364,59 +476,80 @@ export default defineConfig({
 </html>
 '''
     write_text(project_dir / "index.html", index_html)
+    generated_files["index.html"] = index_html
 
     # postcss.config.js
-    write_text(project_dir / "postcss.config.js", '''export default {
+    postcss_cfg = '''export default {
   plugins: {
     tailwindcss: {},
     autoprefixer: {},
   },
 }
-''')
+'''
+    write_text(project_dir / "postcss.config.js", postcss_cfg)
+    generated_files["postcss.config.js"] = postcss_cfg
 
     # tailwind.config.js
-    write_text(project_dir / "tailwind.config.js", '''/** @type {import('tailwindcss').Config} */
+    tailwind_cfg = '''/** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: { extend: {} },
   plugins: [],
 }
-''')
+'''
+    write_text(project_dir / "tailwind.config.js", tailwind_cfg)
+    generated_files["tailwind.config.js"] = tailwind_cfg
 
     # src/index.css
-    write_text(project_dir / "src/index.css", '''@tailwind base;
+    index_css = '''@tailwind base;
 @tailwind components;
 @tailwind utilities;
-''')
+'''
+    write_text(project_dir / "src/index.css", index_css)
+    generated_files["src/index.css"] = index_css
+    
+    return generated_files
 
 
-def _generate_types(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate TypeScript types - each type in its own file."""
+def _generate_types(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any], api_contract: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate TypeScript types - each type in its own file. Returns files as key-value pairs."""
     types_dir = project_dir / "src/types"
     types_list = structure.get("types", [])
+    generated_files: Dict[str, str] = {}
     
     if not types_list:
-        return
+        return generated_files
     
     generated_types = []
+    
+    # Get model definitions from API contract if available
+    contract_models = {}
+    if api_contract:
+        for ep in api_contract.get("endpoints", []):
+            response = ep.get("response", {})
+            if response.get("success"):
+                body = response["success"].get("body", {})
+                contract_models.update(body)
     
     for type_def in types_list:
         type_name = type_def.get("name", "Unknown")
         type_purpose = type_def.get("purpose", "")
         type_fields = type_def.get("fields", {})
         
-        # Generate type using LLM for better quality
+        # Generate type using LLM with API contract context
         type_prompt = f"""Generate a TypeScript interface/type for: {type_name}
 
 Purpose: {type_purpose}
 Base fields: {type_fields}
 Application: {prompt}
+API Contract context: {json.dumps(contract_models) if contract_models else "None"}
 
 Requirements:
 - Export the interface
 - Add JSDoc comments
 - Include any related types (e.g., CreateDTO, UpdateDTO if relevant)
 - Use proper TypeScript conventions
+- Types MUST be compatible with the API contract
 
 Return ONLY TypeScript code, no markdown."""
 
@@ -428,25 +561,35 @@ Return ONLY TypeScript code, no markdown."""
         )
         
         type_code = _clean_code_response(type_code)
+        file_path = f"src/types/{type_name}.ts"
         write_text(types_dir / f"{type_name}.ts", type_code)
+        generated_files[file_path] = type_code
         generated_types.append(type_name)
     
     # Generate index.ts that re-exports all types
     if generated_types:
-        index_content = "\n".join([f"export * from './{t}';" for t in generated_types])
-        write_text(types_dir / "index.ts", index_content + "\n")
+        index_content = "\n".join([f"export * from './{t}';" for t in generated_types]) + "\n"
+        write_text(types_dir / "index.ts", index_content)
+        generated_files["src/types/index.ts"] = index_content
+    
+    return generated_files
 
 
-def _generate_hooks(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate custom hooks - each hook in its own file."""
+def _generate_hooks(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any], api_contract: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate custom hooks - each hook in its own file. Returns files as key-value pairs."""
     hooks_dir = project_dir / "src/hooks"
     hooks_list = structure.get("hooks", [])
+    generated_files: Dict[str, str] = {}
     
     if not hooks_list:
-        return
+        return generated_files
     
     generated_hooks = []
     type_names = [t.get("name") for t in structure.get("types", [])]
+    api_endpoints = []
+    if api_contract:
+        api_endpoints = [{"method": ep.get("method"), "path": ep.get("path"), "name": ep.get("name")} 
+                        for ep in api_contract.get("endpoints", [])]
     
     for hook in hooks_list:
         hook_name = hook.get("name", "useCustom")
@@ -457,7 +600,7 @@ def _generate_hooks(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dic
 Purpose: {hook_purpose}
 Application: {prompt}
 Available types to import from '@/types': {type_names}
-API endpoints: {structure.get('api_endpoints', [])}
+API Contract endpoints to use: {json.dumps(api_endpoints) if api_endpoints else structure.get('api_endpoints', [])}
 
 Requirements:
 - Use TypeScript
@@ -465,6 +608,7 @@ Requirements:
 - Follow React hooks rules
 - Include proper cleanup
 - Export as default and named export
+- MUST use the exact API endpoints from the contract
 
 Return ONLY the code, no markdown."""
 
@@ -481,58 +625,80 @@ Return ONLY the code, no markdown."""
         if f"export default {hook_name}" not in hook_code and "export default" not in hook_code:
             hook_code += f"\n\nexport default {hook_name};\n"
         
+        file_path = f"src/hooks/{hook_name}.ts"
         write_text(hooks_dir / f"{hook_name}.ts", hook_code)
+        generated_files[file_path] = hook_code
         generated_hooks.append(hook_name)
     
     # Generate index
     if generated_hooks:
         index_lines = [f"export {{ default as {h} }} from './{h}';" for h in generated_hooks]
-        write_text(hooks_dir / "index.ts", "\n".join(index_lines) + "\n")
+        index_content = "\n".join(index_lines) + "\n"
+        write_text(hooks_dir / "index.ts", index_content)
+        generated_files["src/hooks/index.ts"] = index_content
+    
+    return generated_files
 
 
-def _generate_services(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate API service layer."""
+def _generate_services_from_contract(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any], api_contract: Dict[str, Any]) -> Dict[str, str]:
+    """Generate API service layer based on API contract. Returns files as key-value pairs."""
     services_dir = project_dir / "src/services"
-    endpoints = structure.get("api_endpoints", [])
+    ensure_dir(services_dir)
+    generated_files: Dict[str, str] = {}
+    
+    endpoints = api_contract.get("endpoints", [])
     type_names = [t.get("name") for t in structure.get("types", [])]
+    base_url = api_contract.get("base_url", "/api")
+    auth = api_contract.get("authentication", {})
     
-    if not endpoints:
-        return
-    
-    service_prompt = f"""Generate an API service module for a React app.
+    service_prompt = f"""Generate a TypeScript API service module for a React app based on this EXACT API contract.
 
-API Endpoints: {endpoints}
+API Base URL: {base_url}
+Authentication: {json.dumps(auth)}
+
+API Endpoints (MUST implement ALL of these exactly):
+{json.dumps(endpoints, indent=2)}
+
 Available types from '@/types': {type_names}
 Application: {prompt}
 
 Requirements:
 - Create a typed API client
-- Use fetch or axios pattern
-- Handle errors properly
-- Export functions for each endpoint (get, create, update, delete as needed)
-- Use TypeScript
+- Use fetch with proper error handling
+- Implement EVERY endpoint from the contract exactly as specified
+- Export functions matching endpoint names (e.g., healthCheck, login, register, listItems, createItem, etc.)
+- Include proper TypeScript types for request/response
+- Handle authentication token storage and headers
+- Each function should match the exact method, path, and request/response structure from the contract
 
-Return ONLY the code."""
+Return ONLY the code, no markdown."""
 
     service_code = llm.generate_code(
         service_prompt,
         system=FRONTEND_SYSTEM_PROMPT,
         temperature=0.3,
-        max_tokens=3000
+        max_tokens=4096
     )
     
     service_code = _clean_code_response(service_code)
     write_text(services_dir / "api.ts", service_code)
-    write_text(services_dir / "index.ts", "export * from './api';\n")
+    generated_files["src/services/api.ts"] = service_code
+    
+    index_content = "export * from './api';\n"
+    write_text(services_dir / "index.ts", index_content)
+    generated_files["src/services/index.ts"] = index_content
+    
+    return generated_files
 
 
-def _generate_components(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate React components - each in its own file."""
+def _generate_components(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any], api_contract: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate React components - each in its own file. Returns files as key-value pairs."""
     components_dir = project_dir / "src/components"
     components_list = structure.get("components", [])
+    generated_files: Dict[str, str] = {}
     
     if not components_list:
-        return
+        return generated_files
     
     layout_keywords = ["Header", "Footer", "Sidebar", "Layout", "Navbar", "Navigation", "Nav"]
     ui_keywords = ["Button", "Input", "Card", "Modal", "Loader", "Spinner", "Badge"]
@@ -540,6 +706,11 @@ def _generate_components(prompt: str, project_dir: Path, llm: BaseLLM, structure
     generated: Dict[str, List[str]] = {"root": [], "layout": [], "ui": []}
     type_names = [t.get("name") for t in structure.get("types", [])]
     hook_names = [h.get("name") for h in structure.get("hooks", [])]
+    
+    # Get API contract info for components
+    api_info = ""
+    if api_contract:
+        api_info = f"API endpoints available: {json.dumps([ep.get('name') for ep in api_contract.get('endpoints', [])])}"
     
     for component in components_list:
         comp_name = component.get("name", "Component")
@@ -565,6 +736,7 @@ def _generate_components(prompt: str, project_dir: Path, llm: BaseLLM, structure
 Purpose: {comp_purpose}
 Props: {comp_props}
 Application context: {prompt}
+{api_info}
 
 Available imports:
 - Types from '@/types': {type_names}
@@ -577,6 +749,7 @@ Requirements:
 - Handle edge cases (empty, loading if applicable)
 - Accessibility attributes where needed
 - Export as default
+- If using API data, ensure types match the API contract
 
 Return ONLY the component code, no markdown code blocks."""
 
@@ -592,7 +765,14 @@ Return ONLY the component code, no markdown code blocks."""
         if "export default" not in comp_code:
             comp_code += f"\n\nexport default {comp_name};\n"
         
+        # Determine file path for key-value output
+        if category_key == "root":
+            file_path = f"src/components/{comp_name}.tsx"
+        else:
+            file_path = f"src/components/{category_key}/{comp_name}.tsx"
+        
         write_text(target_dir / f"{comp_name}.tsx", comp_code)
+        generated_files[file_path] = comp_code
         generated[category_key].append(comp_name)
         log.debug(f"Generated component: {comp_name} in {category_key}")
     
@@ -603,11 +783,15 @@ Return ONLY the component code, no markdown code blocks."""
         
         if category == "root":
             target_dir = components_dir
+            index_path = "src/components/index.ts"
         else:
             target_dir = components_dir / category
+            index_path = f"src/components/{category}/index.ts"
         
         index_lines = [f"export {{ default as {n} }} from './{n}';" for n in names]
-        write_text(target_dir / "index.ts", "\n".join(index_lines) + "\n")
+        index_content = "\n".join(index_lines) + "\n"
+        write_text(target_dir / "index.ts", index_content)
+        generated_files[index_path] = index_content
     
     # Main components index
     main_exports = []
@@ -619,20 +803,30 @@ Return ONLY the component code, no markdown code blocks."""
         main_exports.append("export * from './ui';")
     
     if main_exports:
-        write_text(components_dir / "index.ts", "\n".join(main_exports) + "\n")
+        main_index_content = "\n".join(main_exports) + "\n"
+        write_text(components_dir / "index.ts", main_index_content)
+        generated_files["src/components/index.ts"] = main_index_content
+    
+    return generated_files
 
 
-def _generate_pages(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate page components."""
+def _generate_pages(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any], api_contract: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate page components. Returns files as key-value pairs."""
     pages_dir = project_dir / "src/pages"
     pages_list = structure.get("pages", [])
+    generated_files: Dict[str, str] = {}
     
     if not pages_list:
-        return
+        return generated_files
     
     component_names = [c.get("name") for c in structure.get("components", [])]
     hook_names = [h.get("name") for h in structure.get("hooks", [])]
     type_names = [t.get("name") for t in structure.get("types", [])]
+    
+    # Get API info
+    api_info = ""
+    if api_contract:
+        api_info = f"API Contract: {json.dumps([{'name': ep.get('name'), 'method': ep.get('method'), 'path': ep.get('path')} for ep in api_contract.get('endpoints', [])])}"
     
     generated_pages = []
     
@@ -646,11 +840,13 @@ def _generate_pages(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dic
 Route: {page_route}
 Purpose: {page_purpose}
 Application: {prompt}
+{api_info}
 
 Available imports:
 - Components from '@/components': {component_names}
 - Hooks from '@/hooks': {hook_names}
 - Types from '@/types': {type_names}
+- API services from '@/services': Available
 
 Requirements:
 - TypeScript
@@ -659,6 +855,7 @@ Requirements:
 - Handle loading/error/empty states
 - Proper page structure
 - Export as default
+- Use API services that match the contract
 
 Return ONLY the code."""
 
@@ -674,20 +871,27 @@ Return ONLY the code."""
         if "export default" not in page_code:
             page_code += f"\n\nexport default {page_name};\n"
         
+        file_path = f"src/pages/{page_name}.tsx"
         write_text(pages_dir / f"{page_name}.tsx", page_code)
+        generated_files[file_path] = page_code
         generated_pages.append(page_name)
     
     # Generate pages index
     if generated_pages:
         index_lines = [f"export {{ default as {p} }} from './{p}';" for p in generated_pages]
-        write_text(pages_dir / "index.ts", "\n".join(index_lines) + "\n")
+        index_content = "\n".join(index_lines) + "\n"
+        write_text(pages_dir / "index.ts", index_content)
+        generated_files["src/pages/index.ts"] = index_content
+    
+    return generated_files
 
 
-def _generate_app(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any]) -> None:
-    """Generate the main App.tsx."""
+def _generate_app(prompt: str, project_dir: Path, llm: BaseLLM, structure: Dict[str, Any], api_contract: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Generate the main App.tsx. Returns files as key-value pairs."""
     pages = structure.get("pages", [])
     components = structure.get("components", [])
     has_routing = structure.get("has_routing", False)
+    generated_files: Dict[str, str] = {}
     
     page_routes = [(p.get("name"), p.get("route", "/")) for p in pages]
     layout_components = [c.get("name") for c in components if c.get("category") == "layout" or c.get("name") in ["Header", "Footer", "Navbar", "Layout"]]
@@ -722,10 +926,15 @@ Return ONLY the code."""
         app_code += "\n\nexport default App;\n"
     
     write_text(project_dir / "src/App.tsx", app_code)
+    generated_files["src/App.tsx"] = app_code
+    
+    return generated_files
 
 
-def _generate_main_entry(project_dir: Path, structure: Dict[str, Any]) -> None:
-    """Generate main.tsx entry point."""
+def _generate_main_entry(project_dir: Path, structure: Dict[str, Any]) -> Dict[str, str]:
+    """Generate main.tsx entry point. Returns files as key-value pairs."""
+    generated_files: Dict[str, str] = {}
+    
     # Simple main.tsx - routing is handled in App.tsx
     main_tsx = '''import React from 'react'
 import ReactDOM from 'react-dom/client'
@@ -739,6 +948,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 )
 '''
     write_text(project_dir / "src/main.tsx", main_tsx)
+    generated_files["src/main.tsx"] = main_tsx
+    
+    return generated_files
 
 
 def _clean_code_response(code: str) -> str:
